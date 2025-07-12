@@ -1,0 +1,128 @@
+# Configuración base para AI for Earthquake Response
+# Esta configuración proporciona un punto de partida sólido para experimentos
+
+# Configuración general
+seed: 42
+deterministic: true
+debug: false
+
+# Configuración de datos
+data:
+  data_root: "data"
+  raw_data_path: "data/raw"
+  processed_data_path: "data/processed"
+  splits_path: "data/splits"
+  
+  # Configuración de imágenes
+  image_size: 512
+  channels: 3
+  num_classes: 2
+  
+  # Configuración de DataLoader
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  shuffle: true
+  
+  # Configuración de splits
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  
+  # Configuración de aumentos
+  use_augmentation: true
+  augmentation_prob: 0.5
+
+# Configuración del modelo
+model:
+  model_name: "unet"
+  backbone: "resnet50"
+  pretrained: true
+  
+  # Hiperparámetros del modelo
+  in_channels: 6  # 3 pre + 3 post
+  out_channels: 1  # Máscara binaria
+  encoder_depth: 5
+  decoder_channels: [256, 128, 64, 32, 16]
+  
+  # Configuración de activaciones
+  activation: "sigmoid"
+  
+  # Dropout y regularización
+  dropout: 0.1
+  attention: false
+
+# Configuración de entrenamiento
+training:
+  # Configuración básica
+  epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  
+  # Optimizador
+  optimizer: "adam"
+  scheduler: "cosine"
+  
+  # Configuración de scheduler
+  scheduler_patience: 10
+  scheduler_factor: 0.5
+  warmup_epochs: 5
+  
+  # Configuración de pérdida
+  loss_function: "bce_dice"
+  class_weights: null
+  
+  # Configuración de validación
+  val_frequency: 1
+  save_frequency: 10
+  
+  # Configuración de early stopping
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.0001
+  
+  # Configuración de checkpointing
+  save_best_only: true
+  save_last: true
+
+# Configuración de hardware
+hardware:
+  # Configuración de GPU
+  device: "auto"
+  gpu_ids: [0]
+  
+  # Configuración de entrenamiento distribuido
+  distributed: false
+  backend: "nccl"
+  world_size: 1
+  rank: 0
+  
+  # Configuración de mixed precision
+  use_amp: true
+  amp_dtype: "float16"
+  
+  # Configuración de memoria
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+
+# Configuración de logging
+logging:
+  # Configuración de experimentos
+  experiment_name: "earthquake_damage_detection"
+  run_name: null
+  
+  # Configuración de logging
+  log_dir: "outputs/logs"
+  tensorboard: true
+  wandb: false
+  wandb_project: "ai4eo-earthquake"
+  wandb_entity: null
+  
+  # Configuración de guardado
+  output_dir: "outputs"
+  models_dir: "outputs/models"
+  predictions_dir: "outputs/predictions"
+  
+  # Configuración de logging de métricas
+  log_frequency: 10
+  log_images: true
+  log_images_frequency: 50 
