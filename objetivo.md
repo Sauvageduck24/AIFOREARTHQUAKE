@@ -1,108 +1,203 @@
-Además de lo que ya resumimos, aquí tienes un desglose más concreto de los **datos disponibles**, qué tendrás que **predecir** y cómo están estructurados:
+## Proyecto AI for Earthquake Response
+
+Este documento describe de forma resumida y organizada los **objetivos**, **datos**, **preprocesamiento** y **estrategia de modelado** para la competición AI for Earthquake Response.
 
 ---
 
-## 📦 ¿Qué incluye el dataset?
+### 1. Objetivo del proyecto
 
-1. **Imágenes Satelitales**
-
-   * **Pre-evento** y **post-evento** (ópticas multiespectrales, a veces con banda pancromática asociada)
-   * Resolución espacial típica: 0.5 – 1 m/píxel (Pleiades)
-   * Formato: GeoTIFF con georreferenciación WGS84
-   * Algunas escenas ya vienen pan-sharpened; otras incluyen la banda pancromática por separado.
-
-2. **Polígonos de Edificios**
-
-   * Extraídos de OpenStreetMap o generados manualmente
-   * Formato: Shapefile (.shp) o GeoJSON
-   * Cada polígono tiene un atributo `damage` (donde está disponible):
-
-     * **0** = indemne
-     * **1** = dañado
-
-3. **Anotaciones de Nivel Objeto**
-
-   * Para un subconjunto de edificios: etiqueta binaria (dañado vs. indemne).
-   * No cubren todos los edificios de la escena, pero sí muestras representativas de zonas afectadas y no afectadas.
+Desarrollar una **pipeline de IA** que, dadas imágenes satelitales pre- y post-terremoto y un archivo de polígonos de edificios, asigne una etiqueta de **dañado (1)** o **indemne (0)** a cada edificio. El fin es acelerar la generación de mapas de daños tras un sismo.
 
 ---
 
-## 🎯 ¿Qué hay que predecir?
+### 2. Descripción del dataset
 
-### 1. Clasificación de cada edificio
+#### 2.1 Imágenes Satelitales
 
-* **Tarea principal**: dado el recorte de imagen (post-evento, o pre+post), asignar a cada polígono un label `{0,1}`.
-* Métricas habituales:
+* **Tipos**: ópticas multiespectrales, algunas con banda pancromática.
+* **Temporalidad**: escenas **pre-evento** y **post-evento**.
+* **Resolución**: \~0.5 – 1 m/píxel (Pleiades).
+* **Formato**: GeoTIFF georreferenciado (WGS84).
+* **Pan-sharpening**: algunos archivos ya preprocesados, otros con bandas pancromáticas separadas.
 
-  * **IoU** (Intersection over Union) sobre polígono vs. máscara de verdad tierra
-  * **F1-score** / **Precision-Recall** en la detección de edificios dañados
-  * **Accuracy** por edificio (aunque el dataset está desbalanceado hacia no dañados)
+#### 2.2 Polígonos de Edificios
 
-### 2. (Opcional) Segmentación Semántica
+* **Origen**: OpenStreetMap o anotaciones manuales.
+* **Formato**: Shapefile (.shp) o GeoJSON.
+* **Atributos**:
 
-* Predecir una **máscara raster** de “daño” dentro de cada tile, útil si quieres refinar el contorno del daño.
-* Métrica: IoU / Dice sobre píxeles etiquetados.
+  * `building_id`: identificador único.
+  * `damage` (cuando existe): 0 (indemne), 1 (dañado).
+
+#### 2.3 Anotaciones de Nivel Objeto
+
+* Etiquetas binarias (dañado vs. indemne) para un **subconjunto** de edificios.
+* No cubren todos los edificios, pero ofrecen muestras representativas.
 
 ---
 
-## 🔧 Cómo están organizados los ficheros
+### 3. Tareas de predicción
+
+1. **Clasificación de edificios**:
+
+   * Input: recortes de imagen (post-evento o pre+post).
+   * Output: etiqueta `{0,1}` por edificio.
+   * Métricas: IoU, F1-score, Precision–Recall, Accuracy.
+
+2. **(Opcional) Segmentación semántica**:
+
+   * Input: tile completo.
+   * Output: máscara raster de pixels dañados.
+   * Métricas: IoU o Dice.
+
+---
+
+### 4. Organización de ficheros real (data/international-charter-eo4ai-etq-challenge)
 
 ```
-└─ dataset/
-   ├─ pre_event/            # GeoTIFFs multiespectrales o pancromáticos
-   ├─ post_event/           # GeoTIFFs multiespectrales o pancromáticos
-   ├─ pan/                  # (si aplica) bandas pancromáticas
-   ├─ polygons/
-   │    ├─ all_buildings.shp   # shapefile con todos los polígonos
-   │    └─ labels.geojson      # subset anotado con campo “damage”
-   └─ splits/
-        ├─ train.txt       # lista de IDs de escena para entrenamiento
-        ├─ val.txt         # validación
-        └─ test.txt        # evaluación final (sin labels entregados)
+data/international-charter-eo4ai-etq-challenge/
+├─ Training/
+│   ├─ Call_1075_China/
+│   │   ├─ WV03N28_549166E087_4023612023062600000000PN00-calibrated/
+│   │   │   ├─ Optical_Calibration/
+│   │   │   │   ├─ overview-pan.tif
+│   │   │   │   └─ r-pan.tif
+│   │   │   └─ WV03N28_549166E087_4023612023062600000000PN00-calibrated.json
+│   │   └─ ...
+│   ├─ ...
+│   ├─ Annotations/
+│   │   ├─ Call_1075_China/
+│   │   │   ├─ china_training.gpkg
+│   │   │   └─ china_testing.gpkg
+│   │   ├─ Call_919_Turkey/
+│   │   │   ├─ antakya_east_training.gpkg
+│   │   │   ├─ antakya_east_testing.gpkg
+│   │   │   ├─ marash_training.gpkg
+│   │   │   ├─ marash_testing.gpkg
+│   │   │   ├─ adiyaman_training.gpkg
+│   │   │   ├─ adiyaman_testing.gpkg
+│   │   │   └─ ...
+│   │   └─ ...
+│   └─ training_dataset.contents
+├─ example_submission.zip
+├─ example_submission_unzipped/
+│   └─ example_submission/
+│       ├─ china_testing_Ex.gpkg
+│       ├─ marash_testing_Ex.gpkg
+│       ├─ adiyaman_testing_Ex.gpkg
+│       └─ antakya_east_testing_Ex.gpkg
+├─ Phase_1_Dataset_Details.xlsx
+├─ catalog.json
+├─ charter-dataset.structure
+├─ charter-dataset.filelist
+├─ README.md
+└─ catalog.v1.parquet
 ```
 
-* Cada escena viene con un **ID único** que empareja
-
-  * el par pre/post-evento
-  * el fichero de polígonos
-
 ---
 
-## 🛠 Flujo típico de pre-procesamiento
+### 5. Pipeline de preprocesamiento
 
-1. **Pan-sharpening** (si tienes banda pancromática)
-2. **Co-registro** de pre vs. post (alineación geométrica)
-3. **Recorte** de tiles (patches) centrados en cada polígono, con algo de “padding”
-4. **Normalización** de bandas (min-max o z-score)
-5. **Aumentos** (rotaciones, flips, cambios de brillo/contraste)
-6. **Vector → Raster**: rasterizar el polígono para obtener la máscara de verdad tierra
+Un flujo reproducible y paralelo para transformar 200 GB de datos en parches listos para entrenamiento:
 
----
+| Paso                    | Herramienta                      | Output                          |
+| ----------------------- | -------------------------------- | ------------------------------- |
+| 1. Pan-sharpen          | rasterio / GDAL                  | COG pancromático fusionado      |
+| 2. Co-registro          | rasterio.warp / OpenCV / elastix | COG pre-evento alineado         |
+| 3. Tileado              | rio-tiler / rasterio.windows     | Parches multiespectrales COG    |
+| 4. Normalización        | NumPy / PyTorch transforms       | Parches float32 normalizados    |
+| 5. Rasterizado máscaras | geopandas + rasterio.features    | Máscaras binarias en COG o Zarr |
 
-Con todo esto claro, el **target** de tu modelo es asignar a cada edificio la etiqueta “dañado” o “indemne”, aprovechando la información espacial y espectral que ofrecen las imágenes multitemporales.
+#### 5.1 Formato de salida
 
-
------
-
-
-| Paso                      | Herramienta                           | Salida                                |
-| ------------------------- | ------------------------------------- | ------------------------------------- |
-| 1. Pan-sharpen            | `rasterio` + `rio-tiler` o `gdal`     | COG pancromático fusionado            |
-| 2. Co-registro            | `rasterio.warp`, `opencv` o `elastix` | COG pre‐evento alineado a post‐evento |
-| 3. Tileado                | `rio-tiler`, `rasterio.windows`       | Parches multiespectrales COG          |
-| 4. Normalización          | NumPy / PyTorch transforms            | Parches normalizados (float32)        |
-| 5. Rasterizado de máscara | `geopandas` + `rasterio.features`     | Máscaras binarias en COG o Zarr       |
-
-
+```
 preprocessed/
-├─ scenes/              # GeoTIFFs o Zarr por escena
+├─ scenes/                # GeoTIFFs o Zarr por escena
 │   ├─ 0001_pre_reg.COG
 │   ├─ 0001_post_reg.COG
-│   └─ …  
-├─ tiles/               # Parches listos para entrenamiento
-│   ├─ 0001/             # folder por escena
+│   └─ …
+├─ tiles/                 # Parches para entrenamiento
+│   ├─ 0001/
 │   │   ├─ img_0001_001.npy
 │   │   ├─ mask_0001_001.npy
 │   │   └─ meta_0001_001.json
 │   └─ …
-└─ index.parquet        # Metadatos de cada parche
+└─ index.parquet          # Metadatos por parche
+```
+
+#### 5.2 Orquestación y versionado
+
+* **Snakemake/Nextflow** para cadenas de trabajo automatizadas.
+* **DVC / Git-LFS** para versionado de datos grandes.
+* **Conda / Docker** para entornos reproducibles.
+
+---
+
+### 6. Estrategia de modelado: arquitectura multi-cabeza
+
+Combina **generalización global** y **especialización local**:
+
+#### 6.1 Estructura
+
+1. **Backbone compartido** (ResNet/EfficientNet)
+2. **Cuatro heads**: una por ciudad, con clasificación binaria
+3. **Pérdidas independientes**: BCE o focal loss por head, combinadas en la loss total
+
+#### 6.2 Flujo de entrenamiento
+
+1. Lectura de batch con imágenes y etiqueta de ciudad.
+2. Forward por backbone → enrute a head según ciudad.
+3. Cálculo de pérdidas \$L\_i\$ y pérdida agregada \$L=\frac{1}{4}\sum\_i L\_i\$.
+4. Backpropagation conjunta.
+
+#### 6.3 Opcional: adaptación de dominio
+
+* Clasificador adversarial para forzar invariancia de dominio
+* Backbone entrenado a confundir dicho clasificador
+
+#### 6.4 Puntos clave
+
+* Balanceo de batches por ciudad
+* LR diferenciado: bajo para backbone, alto para heads
+* Monitorización F1 por ciudad
+
+#### 6.5 Visualización y monitoreo con Weights & Biases (wandb)
+
+Para el seguimiento y visualización de experimentos, métricas y resultados, se utiliza la plataforma [Weights & Biases](https://wandb.ai/):
+
+- Registro automático de métricas de entrenamiento y validación (loss, F1, accuracy, etc.).
+- Visualización de curvas de aprendizaje y comparación entre experimentos.
+- Almacenamiento de artefactos como modelos, predicciones y gráficos de resultados.
+- Integración sencilla con PyTorch y otros frameworks mediante la API de wandb.
+
+Esto permite un análisis reproducible y colaborativo del desempeño del modelo a lo largo del desarrollo.
+
+---
+
+## Resumen ejecutivo
+
+Este proyecto aborda el desafío AI for Earthquake Response, cuyo objetivo es desarrollar una pipeline de inteligencia artificial capaz de identificar automáticamente edificios dañados tras un terremoto, a partir de imágenes satelitales y datos vectoriales de edificios. El enfoque combina procesamiento geoespacial, aprendizaje profundo y buenas prácticas de experimentación para acelerar la generación de mapas de daños y apoyar la respuesta humanitaria.
+
+---
+
+### Aclaración sobre poligonización
+
+La poligonización de edificios (generación de polígonos vectoriales que representan la huella de cada edificio) **no es parte del challenge**. Se asume que los polígonos de edificios ya están provistos como insumo, y la tarea consiste únicamente en clasificar el daño (0: indemne, 1: dañado) para cada polígono.
+
+---
+
+### Formato y convención de nombres de example_submission.zip
+
+El archivo `example_submission.zip` contiene la estructura y formato esperados para la submission del challenge:
+
+- Dentro del zip hay una carpeta (por ejemplo, `example_submission/`) con varios archivos `.gpkg`, uno por sitio o área de test.
+- Cada archivo `.gpkg` debe tener:
+  - Una columna `building_id` (identificador único del edificio).
+  - Una columna `damage` (0: indemne, 1: dañado).
+  - La geometría de cada edificio (polígono).
+- El nombre de cada archivo sigue la convención `{site_id}_testing.gpkg` (por ejemplo, `china_testing.gpkg`, `marash_testing.gpkg`).
+- El formato de columnas, tipos y sistema de referencia espacial debe ser idéntico al de los archivos de ejemplo.
+
+La submission final debe replicar exactamente esta estructura y convención de nombres para ser válida.
+
+---
