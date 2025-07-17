@@ -265,23 +265,28 @@ class EarthquakeDataset(Dataset):
 class PreprocessedTileDataset(Dataset):
     """
     Dataset para datos preprocesados por preprocess.py (tiles en .pt y meta.json).
-    Permite filtrar por train/test usando el campo label_path.
+    Permite filtrar por train/test usando el campo label_path y por is_partial.
+    Permite cargar imágenes sin máscara (para inferencia).
     """
-    def __init__(self, data_root: str, split: str = 'full', mode: str = 'all', transform=None):
+    def __init__(self, data_root: str, split: str = 'full', mode: str = 'all', transform=None, is_partial: Optional[bool] = None, with_mask: bool = True):
         self.data_root = Path(data_root)
         self.split = split
         self.transform = transform
         self.mode = mode
+        self.is_partial = is_partial
+        self.with_mask = with_mask
         meta_path = self.data_root / split / 'meta.json'
         with open(meta_path, 'r') as f:
             meta = json.load(f)
         # Filtrar según el modo
         if mode == 'train':
-            self.meta = [item for item in meta if 'training' in item.get('label_path', '').lower()]
+            meta = [item for item in meta if 'training' in item.get('label_path', '').lower()]
         elif mode == 'test':
-            self.meta = [item for item in meta if 'testing' in item.get('label_path', '').lower()]
-        else:
-            self.meta = meta
+            meta = [item for item in meta if 'testing' in item.get('label_path', '').lower()]
+        # Filtrar por is_partial si se especifica
+        if is_partial is not None:
+            meta = [item for item in meta if item.get('is_partial', False) == is_partial]
+        self.meta = meta
         self.images_dir = self.data_root / split / 'images'
         self.masks_dir = self.data_root / split / 'masks'
 
@@ -292,21 +297,31 @@ class PreprocessedTileDataset(Dataset):
         item = self.meta[idx]
         tile_id = item['id']
         img_path = self.images_dir / f"{tile_id}.pt"
-        mask_path = self.masks_dir / f"{tile_id}.pt"
         image = torch.load(img_path, map_location='cpu')
-        mask = torch.load(mask_path, map_location='cpu')
+        if self.with_mask:
+            mask_path = self.masks_dir / f"{tile_id}.pt"
+            mask = torch.load(mask_path, map_location='cpu')
+        else:
+            mask = None
         if self.transform:
-            out = self.transform(image=image, mask=mask)
-            image = out['image']
-            mask = out['mask']
-        return {
+            if self.with_mask and mask is not None:
+                out = self.transform(image=image, mask=mask)
+                image = out['image']
+                mask = out['mask']
+            else:
+                out = self.transform(image=image)
+                image = out['image']
+        result = {
             'image': image,
-            'mask': mask,
             'tile_id': tile_id,
             'city': item.get('city', ''),
             'scene_id': item.get('scene_id', ''),
-            'bbox': item.get('bbox', None)
+            'bbox': item.get('bbox', None),
+            'is_partial': item.get('is_partial', False)
         }
+        if self.with_mask:
+            result['mask'] = mask
+        return result
 
 
 def get_data_loaders(

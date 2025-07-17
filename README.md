@@ -82,6 +82,40 @@ data/
 └── splits/                 # Particiones train/val/test
 ```
 
+## Estructura del dataset y preprocesamiento
+
+El siguiente diagrama muestra cómo están organizados los datos antes y después de ejecutar el preprocesamiento:
+
+![Estructura del dataset](dataset.jpg)
+
+### Descripción del flujo de datos
+
+- **Datos crudos (antes de preprocesar):**
+  - Carpeta `Training/` con subcarpetas por ciudad (`Call_<ID>_<Ciudad>/`).
+  - Cada ciudad contiene:
+    - `collection.json`: catálogo STAC de escenas.
+    - Archivos `.json` de escenas calibradas (con referencias a las bandas).
+    - Archivos `.tif` de bandas espectrales (blue, green, red, nir, pan).
+    - Anotaciones vectoriales de daño en `Annotations/<ID>_<Ciudad>/*.gpkg`.
+
+- **Preprocesamiento (`preprocess.py`):**
+  - Lee y organiza las imágenes pre y post evento.
+  - Genera tiles normalizados y máscaras rasterizadas.
+  - Calcula estadísticas globales (media y std).
+  - Guarda overlays de debug si se solicita.
+
+- **Datos tras preprocesar (para el dataset):**
+  - Carpeta `data/preprocessed/` con splits: `full/`, `small/`, `test/`.
+  - Cada split contiene:
+    - `images/`: tiles de imágenes como tensores `.pt` ([canales, 512, 512]).
+    - `masks/`: máscaras de daño como tensores `.pt` ([512, 512]).
+    - `meta.json`: lista de metadatos de cada tile, incluyendo:
+      - id, ciudad, escena, bandas, paths, bbox, is_partial, y un campo `images_info` con la información de las imágenes pre y post usadas (scene_id, fecha, tipo).
+  - Archivo `stats.json` con media y desviación estándar global.
+  - Carpeta `debug_vis/` con visualizaciones opcionales.
+
+Para más detalles, consulta el código fuente de `preprocess.py` y el ejemplo de salida en la carpeta `data/preprocessed/`.
+
 ## 🏗️ Entrenamiento
 
 ### Entrenamiento Básico

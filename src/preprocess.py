@@ -33,18 +33,19 @@ import matplotlib
 matplotlib.use('Agg')
 from scipy.ndimage import shift as ndi_shift
 import glob
+import re
 
-RAW_DATA_ROOT = Path("./data/international-charter-eo4ai-etq-challenge/Training")
-OUTPUT_ROOT = Path("./data/preprocessed")
+RAW_DATA_ROOT = Path("data/international-charter-eo4ai-etq-challenge/Training")
+OUTPUT_ROOT = Path("data/preprocessed")
 TILE_SIZE = 512
 TILE_OVERLAP = 64
 
-# --- read_stac adaptado a la estructura real ---
+# --- read_stac adaptado a la estructura real y pre/post evento ---
 def read_stac(raw_data_root: Path, annotations_root: Path = None):
     annotations_root = annotations_root or (raw_data_root / "Annotations")
     tqdm.write(f"[INFO] Buscando ciudades en {raw_data_root} ...")
     for city_dir in raw_data_root.iterdir():
-        if not city_dir.is_dir():
+        if not city_dir.is_dir() or not city_dir.name.startswith("Call_"):
             continue
         collection_path = city_dir / "collection.json"
         if not collection_path.exists():
@@ -53,6 +54,14 @@ def read_stac(raw_data_root: Path, annotations_root: Path = None):
         tqdm.write(f"[INFO] Procesando ciudad: {city_dir.name}")
         with open(collection_path) as f:
             collection = json.load(f)
+        # --- Extraer fecha del evento del campo de descripción ---
+        desc = collection.get("description", "")
+        m = re.search(r"Date of Charter Activation: (\d{4}-\d{2}-\d{2})", desc)
+        if not m:
+            tqdm.write(f"[WARN] No se encontró fecha de evento en descripción de {city_dir.name}, se omite.")
+            continue
+        event_date = m.group(1)
+        event_date = event_date + "T00:00:00Z"
         # Buscar archivos de anotaciones para la ciudad
         ann_city_dir = annotations_root / city_dir.name
         gpkg_files = sorted(ann_city_dir.glob("*.gpkg")) if ann_city_dir.exists() else []
@@ -64,7 +73,9 @@ def read_stac(raw_data_root: Path, annotations_root: Path = None):
         # Iterar sobre cada archivo de anotaciones
         for label_path in gpkg_files:
             tqdm.write(f"[INFO] Usando archivo de anotaciones: {label_path.name}")
-            # Iterar sobre escenas
+            # --- Clasificar escenas pre y post evento ---
+            pre_items = []
+            post_items = []
             for link in collection.get("links", []):
                 if link.get("rel") != "item":
                     continue
@@ -74,14 +85,51 @@ def read_stac(raw_data_root: Path, annotations_root: Path = None):
                     continue
                 with open(scene_json) as sf:
                     scene = json.load(sf)
+                scene_date = scene.get("properties", {}).get("datetime", None)
+                if not scene_date:
+                    # Intentar extraer fecha del nombre
+                    m2 = re.search(r"(\d{8})", scene_json.name)
+                    if m2:
+                        scene_date = m2.group(1)[:4] + "-" + m2.group(1)[4:6] + "-" + m2.group(1)[6:8] + "T00:00:00Z"
+                if not scene_date:
+                    tqdm.write(f"[WARN] No se encontró fecha para escena {scene_json}, se omite.")
+                    continue
+                if scene_date < event_date:
+                    pre_items.append(scene)
+                else:
+                    post_items.append(scene)
+            if not pre_items or not post_items:
+                tqdm.write(f"[WARN] Faltan escenas pre o post evento en {city_dir.name}, se omite.")
+                continue
+            # Tomar la primera pre y la primera post (puedes mejorar esto si hay varias)
+            pre_scene = pre_items[0]
+            post_scene = post_items[0]
+            def extract_img_paths(scene):
                 assets = scene.get("assets", {})
-                img_paths = {k: (scene_json.parent / v["href"]).resolve() for k, v in assets.items() if "href" in v}
-                yield {
-                    "city": city_dir.name,
-                    "id": f"{scene.get('id', scene_json.stem)}__{label_path.stem}",
-                    "img_paths": img_paths,  # dict: band -> path
-                    "label_path": str(label_path),
-                }
+                return {k: (city_dir / assets[k]["href"]).resolve() for k in assets if "href" in assets[k]}
+            img_paths = {
+                "pre": extract_img_paths(pre_scene),
+                "post": extract_img_paths(post_scene)
+            }
+            # Extraer info de pre y post
+            pre_info = {
+                "scene_id": pre_scene.get("id", "pre"),
+                "date": pre_scene.get("properties", {}).get("datetime", None),
+                "type": "pre"
+            }
+            post_info = {
+                "scene_id": post_scene.get("id", "post"),
+                "date": post_scene.get("properties", {}).get("datetime", None),
+                "type": "post"
+            }
+            images_info = {"pre": pre_info, "post": post_info}
+            yield {
+                "city": city_dir.name,
+                "id": f"{pre_scene.get('id', 'pre')}_{post_scene.get('id', 'post')}__{label_path.stem}",
+                "img_paths": img_paths,  # dict: pre/post -> band -> path
+                "label_path": str(label_path),
+                "images_info": images_info, # Añadir 'images_info' a cada entrada
+            }
 
 # --- pansharpen_if_pan ---
 def pansharpen_if_pan(ms_img, pan_img=None):
@@ -99,28 +147,10 @@ def coregister(pre, post):
     if np.all(pre_mean == 0) or np.all(post_mean == 0):
         # No hacer registro si alguna imagen está vacía
         return post
-    dy, dx, _ = phase_cross_correlation(pre_mean, post_mean, upsample_factor=10)
-    dy = float(np.atleast_1d(dy)[0])
-    dx = float(np.atleast_1d(dx)[0])
+    shift, error, diffphase = phase_cross_correlation(pre_mean, post_mean, upsample_factor=10)
+    dy = float(np.atleast_1d(shift[0]))
+    dx = float(np.atleast_1d(shift[1]))
     return ndi_shift(post, shift=(0, dy, dx), mode="nearest")
-
-# --- clip_to_aoi fix ---
-def clip_to_aoi(img: np.ndarray, gpkg_path: Path, raster_profile: dict):
-    gdf = gpd.read_file(gpkg_path)
-    bounds = gdf.total_bounds
-    transform = raster_profile["transform"]
-    row_start, col_start = ~transform * (bounds[0], bounds[3])
-    row_stop,  col_stop  = ~transform * (bounds[2], bounds[1])
-    row_min, row_max = sorted([int(row_start), int(row_stop)])
-    col_min, col_max = sorted([int(col_start), int(col_stop)])
-    clipped = img[:, row_min:row_max, col_min:col_max]
-    new_profile = raster_profile.copy()
-    new_profile["height"] = clipped.shape[1]
-    new_profile["width"] = clipped.shape[2]
-    new_profile["transform"] = rasterio.transform.from_origin(
-        bounds[0], bounds[3], transform.a, transform.e
-    )
-    return clipped, new_profile
 
 # --- rasterize_labels (usa cache de GPKG) ---
 gdf_cache = {}
@@ -135,8 +165,15 @@ def rasterize_labels(gpkg_path: Path, out_shape, transform, binary=False):
     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notnull()]
     if gdf.empty:
         return np.zeros(out_shape, dtype=np.uint8)
-    if "damage_grade" in gdf.columns:
-        values = [int(getattr(row, "damage_grade", 1)) for row in gdf.itertuples()]
+    if "damaged" in gdf.columns:
+        # 0: no dañado, 1: dañado, NaN: a predecir (usamos 255 para marcar estos píxeles)
+        values = []
+        for row in gdf.itertuples():
+            val = getattr(row, "damaged", None)
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                values.append(255)  # Clase especial para "a predecir"
+            else:
+                values.append(int(val))
     else:
         values = [1 for _ in gdf.geometry]
     burned = rasterio.features.rasterize(
@@ -144,20 +181,11 @@ def rasterize_labels(gpkg_path: Path, out_shape, transform, binary=False):
         out_shape=out_shape, transform=transform, fill=0, dtype=np.uint8
     )
     if binary:
-        burned = (burned > 0).astype(np.uint8)
+        # Solo 0 y 1, pero mantenemos 255 para "a predecir"
+        mask = (burned == 1).astype(np.uint8)
+        mask[burned == 255] = 255
+        burned = mask
     return burned
-
-# --- tile_and_filter ---
-def tile_and_filter(img, mask, tile_size, overlap):
-    H, W = mask.shape
-    step = tile_size - overlap
-    for y in range(0, H - tile_size + 1, step):
-        for x in range(0, W - tile_size + 1, step):
-            tile_img = img[:, y:y+tile_size, x:x+tile_size]
-            tile_mask = mask[y:y+tile_size, x:x+tile_size]
-            if tile_mask.sum() == 0:
-                continue
-            yield tile_img, tile_mask, (y, x)
 
 # --- save_tensor ---
 def save_tensor(tensor, out_path):
@@ -213,27 +241,31 @@ def save_debug_vis(tile_img, tile_mask, out_path):
 
 # --- Utilidad para seleccionar imágenes pre/post y bandas, tile por tile ---
 def get_tile_from_bands(img_paths, y, x, tile_size):
-    ms_bands = [b for b in ["blue", "green", "red", "nir"] if b in img_paths]
-    pan_band = "pan" if "pan" in img_paths else None
-    tile_ms = None
-    tile_pan = None
-    if ms_bands:
-        tile_ms = []
-        for b in ms_bands:
-            with rasterio.open(str(img_paths[b])) as src:
-                tile = src.read(1, window=rasterio.windows.Window(x, y, tile_size, tile_size)).astype(np.float32)
-                tile_ms.append(tile)
-        tile_ms = np.stack(tile_ms, axis=0)
-    if pan_band:
-        with rasterio.open(str(img_paths[pan_band])) as src:
-            tile_pan = src.read(1, window=rasterio.windows.Window(x, y, tile_size, tile_size)).astype(np.float32)
-    return tile_ms, tile_pan
+    # img_paths: {"pre": {...}, "post": {...}}
+    def read_bands(band_paths):
+        ms_bands = [b for b in ["blue", "green", "red", "nir"] if b in band_paths]
+        pan_band = "pan" if "pan" in band_paths else None
+        tile_ms = None
+        tile_pan = None
+        if ms_bands:
+            tile_ms = []
+            for b in ms_bands:
+                with rasterio.open(str(band_paths[b])) as src:
+                    tile = src.read(1, window=rasterio.windows.Window(x, y, tile_size, tile_size)).astype(np.float32)
+                    tile_ms.append(tile)
+            tile_ms = np.stack(tile_ms, axis=0)
+        if pan_band:
+            with rasterio.open(str(band_paths[pan_band])) as src:
+                tile_pan = src.read(1, window=rasterio.windows.Window(x, y, tile_size, tile_size)).astype(np.float32)
+        return tile_ms, tile_pan
+    pre_ms, pre_pan = read_bands(img_paths["pre"])
+    post_ms, post_pan = read_bands(img_paths["post"])
+    return pre_ms, pre_pan, post_ms, post_pan
 
-# --- per-city processing ---
-def process_city(args):
+# --- per-city processing (fusionada con opción de contar tiles mixtos) ---
+def process_city(args, count_mixed_tiles=False):
     (city, items, params) = args
     tqdm.write(f"[INFO] Iniciando procesamiento de ciudad: {city} ({len(items)} escenas)")
-    val_split = params['val_split']
     small_split = params['small_split']
     binary = params['binary']
     debug_vis = params['debug_vis']
@@ -241,22 +273,20 @@ def process_city(args):
     tile_size = params['tile_size']
     tile_overlap = params['tile_overlap']
     stats = None
-    meta = {s: [] for s in ['full', 'small', 'val']}
+    meta = {s: [] for s in ['full', 'small', 'test']}
     debug_samples = []
     import gc
     total_tiles = 0
+    ignored_mixed_tiles = 0
     for item in items:
         id_ = item["id"]
         img_paths = item["img_paths"]
         label_path = item["label_path"]
-        # Abrir una banda para obtener shape y transform
-        with rasterio.open(str(list(img_paths.values())[0])) as src:
+        with rasterio.open(str(list(img_paths["pre"].values())[0])) as src:
             H, W = src.height, src.width
             pre_profile = src.profile
             transform = src.transform
-        # Rasterizar máscara completa una vez (puede ser optimizado a tile si es muy grande)
         mask = rasterize_labels(label_path, (H, W), transform, binary=binary)
-        # Tileado robusto
         step = tile_size - tile_overlap
         y_starts = list(range(0, H - tile_size + 1, step))
         x_starts = list(range(0, W - tile_size + 1, step))
@@ -273,22 +303,20 @@ def process_city(args):
                 if tile_counter % max(1, num_tiles_item // 10) == 0 or tile_counter == num_tiles_item:
                     percent = 100 * tile_counter / num_tiles_item
                     tqdm.write(f"[PROGRESS] Ciudad: {city}, Escena: {id_}, {tile_counter}/{num_tiles_item} tiles ({percent:.1f}%) procesados.")
-                tile_ms, tile_pan = get_tile_from_bands(img_paths, y, x, tile_size)
-                if tile_ms is not None and tile_pan is not None:
-                    tile_pre = pansharpen_if_pan(tile_ms, tile_pan)
-                    tile_post = tile_pre.copy()
-                elif tile_ms is not None:
-                    tile_pre = tile_ms
-                    tile_post = tile_ms.copy()
-                elif tile_pan is not None:
-                    tile_pre = np.expand_dims(tile_pan, 0)
-                    tile_post = tile_pre.copy()
+                pre_ms, pre_pan, post_ms, post_pan = get_tile_from_bands(img_paths, y, x, tile_size)
+                if pre_ms is not None and pre_pan is not None and post_ms is not None and post_pan is not None:
+                    tile_pre = pansharpen_if_pan(pre_ms, pre_pan)
+                    tile_post = pansharpen_if_pan(post_ms, post_pan)
+                elif pre_ms is not None and pre_pan is not None:
+                    tile_pre = pansharpen_if_pan(pre_ms, pre_pan)
+                    tile_post = pre_ms.copy() # No pansharpen post
+                elif post_ms is not None and post_pan is not None:
+                    tile_pre = np.expand_dims(post_ms, 0) # No pansharpen pre
+                    tile_post = post_ms.copy()
                 else:
                     tqdm.write(f"[WARN] No MS ni PAN en escena {id_} de {city}, se omite tile {y},{x}.")
                     continue
-                # Coregister (no tiene sentido si pre==post, pero se deja por compatibilidad)
                 tile_post = coregister(tile_pre, tile_post)
-                # Clip to AOI (ya está en tile, así que solo shape)
                 tile_mask = mask[y:y+tile_size, x:x+tile_size]
                 if tile_mask.sum() == 0:
                     continue
@@ -299,37 +327,77 @@ def process_city(args):
                 tile_id = f"{id_}_{y}_{x}"
                 tile_img_t = torch.from_numpy(tile_img).float()
                 tile_img_t = (tile_img_t - tile_img_t.mean()) / (tile_img_t.std() + 1e-6)
+                stats.update(tile_img_t.numpy())
                 tile_img_t = tile_img_t.half()
                 tile_mask_t = torch.from_numpy(tile_mask).to(torch.uint8)
-                stats.update(tile_img_t.float().numpy())
-                for split in ['full', 'small', 'val']:
-                    if split == 'small' and not is_in_small_split(tile_id, small_split):
-                        continue
-                    if split == 'val' and not val_split:
-                        continue
+                unique_vals = np.unique(tile_mask)
+                is_partial = is_partial_tile(tile_img)
+                if (unique_vals == 255).all():
+                    img_path = output_root / "test" / "images" / f"{tile_id}.pt"
+                    mask_path = output_root / "test" / "masks" / f"{tile_id}.pt"
+                    save_tensor(tile_img_t, img_path)
+                    save_tensor(tile_mask_t, mask_path)
+                    meta['test'].append({
+                        "id": tile_id,
+                        "city": city,
+                        "scene_id": id_,
+                        "bands": list(img_paths["pre"].keys()) + list(img_paths["post"].keys()),
+                        "img_paths": {k: str(v) for k, v in img_paths.items()},
+                        "label_path": str(label_path),
+                        "bbox": [y, x, y+tile_size, x+tile_size],
+                        "is_partial": is_partial,
+                        "images_info": item["images_info"], # Añadir 'images_info' a cada entrada
+                    })
+                elif set(unique_vals).issubset({0, 1}):
                     img_path = output_root / "full" / "images" / f"{tile_id}.pt"
                     mask_path = output_root / "full" / "masks" / f"{tile_id}.pt"
                     if not img_path.exists():
                         save_tensor(tile_img_t, img_path)
                     if not mask_path.exists():
                         save_tensor(tile_mask_t, mask_path)
-                    meta[split].append({
+                    meta['full'].append({
                         "id": tile_id,
                         "city": city,
                         "scene_id": id_,
-                        "bands": list(img_paths.keys()),
+                        "bands": list(img_paths["pre"].keys()) + list(img_paths["post"].keys()),
                         "img_paths": {k: str(v) for k, v in img_paths.items()},
                         "label_path": str(label_path),
                         "bbox": [y, x, y+tile_size, x+tile_size],
+                        "is_partial": is_partial,
+                        "images_info": item["images_info"], # Añadir 'images_info' a cada entrada
                     })
+                    if is_in_small_split(tile_id, small_split):
+                        img_path = output_root / "small" / "images" / f"{tile_id}.pt"
+                        mask_path = output_root / "small" / "masks" / f"{tile_id}.pt"
+                        if not img_path.exists():
+                            save_tensor(tile_img_t, img_path)
+                        if not mask_path.exists():
+                            save_tensor(tile_mask_t, mask_path)
+                        meta['small'].append({
+                            "id": tile_id,
+                            "city": city,
+                            "scene_id": id_,
+                            "bands": list(img_paths["pre"].keys()) + list(img_paths["post"].keys()),
+                            "img_paths": {k: str(v) for k, v in img_paths.items()},
+                            "label_path": str(label_path),
+                            "bbox": [y, x, y+tile_size, x+tile_size],
+                            "is_partial": is_partial,
+                            "images_info": item["images_info"], # Añadir 'images_info' a cada entrada
+                        })
+                else:
+                    if count_mixed_tiles:
+                        ignored_mixed_tiles += 1
                 if debug_vis and len(debug_samples) < debug_vis:
                     debug_samples.append((tile_img, tile_mask, tile_id))
-                del tile_img, tile_img_t, tile_mask, tile_mask_t, tile_pre, tile_post, tile_ms, tile_pan
+                del tile_img, tile_img_t, tile_mask, tile_mask_t, tile_pre, tile_post, pre_ms, pre_pan, post_ms, post_pan
                 gc.collect()
         del mask
         gc.collect()
     tqdm.write(f"[INFO] Finalizado procesamiento de ciudad: {city}")
-    return city, meta, stats, debug_samples
+    if count_mixed_tiles:
+        return (city, meta, stats, debug_samples), ignored_mixed_tiles
+    else:
+        return city, meta, stats, debug_samples
 
 # --- main ---
 def main():
@@ -339,31 +407,39 @@ def main():
     parser = argparse.ArgumentParser(description="Preprocess earthquake-building-damage dataset.")
     parser.add_argument("--raw_data_root", type=str, default=str(RAW_DATA_ROOT), help="Raw data root directory")
     parser.add_argument("--output_root", type=str, default=str(OUTPUT_ROOT), help="Output root directory")
-    parser.add_argument("--val_pct", type=float, default=0.1, help="Fraction of cities for val split")
     parser.add_argument("--small_pct", type=float, default=0.1, help="Fraction of tiles per city for small split")
     parser.add_argument("--binary", action="store_true", help="Collapse mask to binary (0/1)")
-    parser.add_argument("--workers", type=int, default=2, help="Number of parallel workers")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--debug_vis", type=int, default=0, help="Save N debug overlay PNGs")
+    parser.add_argument("--prueba", action="store_true", help="Procesar solo una ciudad para pruebas rápidas",default=True)
 
     args = parser.parse_args()
     raw_data_root = Path(args.raw_data_root)
     output_root = Path(args.output_root)
-    val_pct = args.val_pct
+    # Verificación de existencia de la ruta de datos
+    if not raw_data_root.exists():
+        raise FileNotFoundError(f"El directorio de datos no existe: {raw_data_root.resolve()}\n"
+                                f"Por favor, revisa la ruta y pásala correctamente con --raw_data_root.")
     small_pct = args.small_pct
     binary = args.binary
     workers = args.workers
     debug_vis = args.debug_vis
+    prueba = args.prueba
     tqdm.write(f"[INFO] Iniciando preprocesamiento con {workers} workers...")
     all_items = list(read_stac(raw_data_root))
     cities = sorted(set(item['city'] for item in all_items))
     tqdm.write(f"[INFO] Ciudades encontradas: {cities}")
-    val_cities = {c for c in cities if is_val_city(c, val_pct)}
     city_items = {c: [] for c in cities}
     for item in all_items:
         city_items[item['city']].append(item)
     # Ordenar ciudades por número de escenas (de menor a mayor)
     cities_sorted = sorted(cities, key=lambda c: len(city_items[c]))
-    for split in ["full", "small", "val"]:
+    if prueba:
+        # Solo procesar la primera ciudad para pruebas
+        if cities_sorted:
+            cities_sorted = [cities_sorted[0]]
+            tqdm.write(f"[MODO PRUEBA] Solo se procesará la ciudad: {cities_sorted[0]}")
+    for split in ["full", "small", "test"]:
         (output_root / split / "images").mkdir(parents=True, exist_ok=True)
         (output_root / split / "masks").mkdir(parents=True, exist_ok=True)
     params = {
@@ -371,22 +447,27 @@ def main():
         'output_root': output_root, 'tile_size': TILE_SIZE, 'tile_overlap': TILE_OVERLAP
     }
     results = []
+    ignored_mixed_tiles = 0  # Para validación de integridad
     if workers > 1:
         args_list = []
         for city in cities_sorted:
             params_city = params.copy()
-            params_city['val_split'] = city in val_cities
             params_city['debug_vis'] = debug_vis
             args_list.append((city, city_items[city], params_city))
-        with mp.Pool(workers) as pool:
-            results = pool.map(process_city, args_list)
+        with tqdm(total=len(cities_sorted), desc="Procesando ciudades", ncols=80) as pbar:
+            with mp.Pool(workers) as pool:
+                for res in pool.imap_unordered(process_city, args_list):
+                    results.append(res[0])
+                    ignored_mixed_tiles += res[1]
+                    pbar.update(1)
     else:
-        for city in cities_sorted:
+        for city in tqdm(cities_sorted, desc="Procesando ciudades", ncols=80):
             params_city = params.copy()
-            params_city['val_split'] = city in val_cities
             params_city['debug_vis'] = debug_vis
-            results.append(process_city((city, city_items[city], params_city)))
-    meta = {s: [] for s in ['full', 'small', 'val']}
+            res = process_city((city, city_items[city], params_city))
+            results.append(res[0])
+            ignored_mixed_tiles += res[1]
+    meta = {s: [] for s in ['full', 'small', 'test']}
     stats = None
     debug_samples = []
     for city, meta_city, stats_city, debug_city in results:
@@ -414,10 +495,26 @@ def main():
         for tile_img, tile_mask, tile_id in debug_samples[:debug_vis]:
             out_path = output_root / "debug_vis" / f"{tile_id}.png"
             save_debug_vis(tile_img, tile_mask, out_path)
+    # --- Validación de integridad ---
+    tqdm.write("[VALIDACIÓN] Resumen de splits:")
+    for split in meta:
+        tqdm.write(f"  Split {split}: {len(meta[split])} tiles")
+    tqdm.write(f"  Tiles mixtos ignorados: {ignored_mixed_tiles}")
     tqdm.write(f"[INFO] Preprocesamiento finalizado.")
     end_time = time.time()
     elapsed = end_time - start_time
     tqdm.write(f"[INFO] Tiempo total de ejecución: {elapsed:.2f} segundos.")
+
+# --- Nueva función para detectar si un tile es parcial (tiene valores nodata o NaN)
+def is_partial_tile(tile_img, nodata_values=[0, -9999]):
+    # tile_img: (C, H, W)
+    # Considera parcial si hay algún NaN o algún valor nodata en cualquier banda
+    if np.isnan(tile_img).any():
+        return True
+    for nodata in nodata_values:
+        if (tile_img == nodata).any():
+            return True
+    return False
 
 if __name__ == "__main__":
     main() 
