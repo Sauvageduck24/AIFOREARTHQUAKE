@@ -265,14 +265,23 @@ class EarthquakeDataset(Dataset):
 class PreprocessedTileDataset(Dataset):
     """
     Dataset para datos preprocesados por preprocess.py (tiles en .pt y meta.json).
+    Permite filtrar por train/test usando el campo label_path.
     """
-    def __init__(self, data_root: str, split: str = 'full', transform=None):
+    def __init__(self, data_root: str, split: str = 'full', mode: str = 'all', transform=None):
         self.data_root = Path(data_root)
         self.split = split
         self.transform = transform
+        self.mode = mode
         meta_path = self.data_root / split / 'meta.json'
         with open(meta_path, 'r') as f:
-            self.meta = json.load(f)
+            meta = json.load(f)
+        # Filtrar según el modo
+        if mode == 'train':
+            self.meta = [item for item in meta if 'training' in item.get('label_path', '').lower()]
+        elif mode == 'test':
+            self.meta = [item for item in meta if 'testing' in item.get('label_path', '').lower()]
+        else:
+            self.meta = meta
         self.images_dir = self.data_root / split / 'images'
         self.masks_dir = self.data_root / split / 'masks'
 
@@ -433,13 +442,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     start = time.time()
-    # Dataset y DataLoader para datos preprocesados
+    # Dataset y DataLoader para datos preprocesados (ALL)
     dataset = PreprocessedTileDataset(
         data_root=args.data_root,
         split=args.split,
+        mode='all',
         transform=None
     )
-    print(f"[INFO] PreprocessedTileDataset cargado: {len(dataset)} tiles.")
+    print(f"[INFO] PreprocessedTileDataset (ALL) cargado: {len(dataset)} tiles.")
 
     dataloader = DataLoader(
         dataset,
@@ -448,7 +458,7 @@ if __name__ == '__main__':
         num_workers=args.num_workers,
         pin_memory=True
     )
-    print(f"[INFO] DataLoader creado con batch_size={args.batch_size}.")
+    print(f"[INFO] DataLoader (ALL) creado con batch_size={args.batch_size}.")
 
     # Guardar en memoria optimizada (solo los tensores)
     all_images = []
@@ -458,14 +468,80 @@ if __name__ == '__main__':
         all_masks.append(batch['mask'])
     images_tensor = torch.cat(all_images, dim=0)
     masks_tensor = torch.cat(all_masks, dim=0)
-    print(f"[INFO] Tensores concatenados: imágenes {images_tensor.shape}, máscaras {masks_tensor.shape}")
+    print(f"[INFO] Tensores concatenados (ALL): imágenes {images_tensor.shape}, máscaras {masks_tensor.shape}")
 
     # Guardar en archivos temporales
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_img, tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_mask:
         torch.save(images_tensor, f_img.name)
         torch.save(masks_tensor, f_mask.name)
-        print(f"[INFO] Imágenes guardadas en: {f_img.name}")
-        print(f"[INFO] Máscaras guardadas en: {f_mask.name}")
+        print(f"[INFO] Imágenes (ALL) guardadas en: {f_img.name}")
+        print(f"[INFO] Máscaras (ALL) guardadas en: {f_mask.name}")
+
+    # Dataset y DataLoader para TRAIN
+    train_dataset = PreprocessedTileDataset(
+        data_root=args.data_root,
+        split=args.split,
+        mode='train',
+        transform=None
+    )
+    print(f"[INFO] PreprocessedTileDataset (TRAIN) cargado: {len(train_dataset)} tiles.")
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    all_train_images = []
+    all_train_masks = []
+    for batch in train_loader:
+        all_train_images.append(batch['image'])
+        all_train_masks.append(batch['mask'])
+    if all_train_images:
+        train_images_tensor = torch.cat(all_train_images, dim=0)
+        train_masks_tensor = torch.cat(all_train_masks, dim=0)
+        print(f"[INFO] Tensores concatenados (TRAIN): imágenes {train_images_tensor.shape}, máscaras {train_masks_tensor.shape}")
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_img, tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_mask:
+            torch.save(train_images_tensor, f_img.name)
+            torch.save(train_masks_tensor, f_mask.name)
+            print(f"[INFO] Imágenes (TRAIN) guardadas en: {f_img.name}")
+            print(f"[INFO] Máscaras (TRAIN) guardadas en: {f_mask.name}")
+    else:
+        print("[INFO] No hay datos de TRAIN para guardar.")
+
+    # Dataset y DataLoader para TEST
+    test_dataset = PreprocessedTileDataset(
+        data_root=args.data_root,
+        split=args.split,
+        mode='test',
+        transform=None
+    )
+    print(f"[INFO] PreprocessedTileDataset (TEST) cargado: {len(test_dataset)} tiles.")
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    all_test_images = []
+    all_test_masks = []
+    for batch in test_loader:
+        all_test_images.append(batch['image'])
+        all_test_masks.append(batch['mask'])
+    if all_test_images:
+        test_images_tensor = torch.cat(all_test_images, dim=0)
+        test_masks_tensor = torch.cat(all_test_masks, dim=0)
+        print(f"[INFO] Tensores concatenados (TEST): imágenes {test_images_tensor.shape}, máscaras {test_masks_tensor.shape}")
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_img, tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_mask:
+            torch.save(test_images_tensor, f_img.name)
+            torch.save(test_masks_tensor, f_mask.name)
+            print(f"[INFO] Imágenes (TEST) guardadas en: {f_img.name}")
+            print(f"[INFO] Máscaras (TEST) guardadas en: {f_mask.name}")
+    else:
+        print("[INFO] No hay datos de TEST para guardar.")
 
     elapsed = time.time() - start
     print(f"[INFO] Tiempo total: {elapsed:.2f} segundos.") 

@@ -2,6 +2,12 @@
 
 Este proyecto implementa modelos de deep learning para la detección automática de daños en edificios tras terremotos utilizando imágenes satelitales multitemporales (antes y después del evento).
 
+---
+
+![Estructura del proyecto](estructura.jpg)
+
+---
+
 ## 🏆 Competición
 
 Este proyecto participa en la competición **[AI for Earthquake Response](https://platform.ai4eo.eu/ai-for-earthquake-response)** organizada por ESA Φ-lab y el International Charter 'Space and Major Disasters'.
@@ -12,6 +18,12 @@ Desarrollar modelos de IA capaces de identificar automáticamente edificios dañ
 
 ## 📁 Estructura del Proyecto
 
+La siguiente imagen muestra la estructura general del repositorio:
+
+![Estructura del proyecto](estructura.jpg)
+
+También se detalla a continuación:
+
 ```
 AIFOREARTHQUAKE/
 ├── data/                   # Datasets locales y preprocesados
@@ -19,14 +31,14 @@ AIFOREARTHQUAKE/
 ├── src/                    # Código fuente principal
 │   ├── data_loader.py      # Carga de datos y DataLoaders
 │   ├── transforms.py       # Transformaciones y aumentos
-│   ├── model.py           # Definición de modelos
-│   ├── train.py           # Entrenamiento y validación
-│   ├── utils.py           # Utilidades y métricas
-│   └── config.py          # Configuración del experimento
+│   ├── model.py            # Definición de modelos
+│   ├── train.py            # Entrenamiento y validación
+│   ├── utils.py            # Utilidades y métricas
+│   └── config.py           # Configuración del experimento
 ├── outputs/                # Modelos, logs y predicciones
 ├── scripts/                # Scripts de ejecución
 ├── requirements.txt        # Dependencias
-└── README.md              # Este archivo
+└── README.md               # Este archivo
 ```
 
 ## 🚀 Instalación
@@ -70,7 +82,7 @@ data/
 └── splits/                 # Particiones train/val/test
 ```
 
-## 🏋️ Entrenamiento
+## 🏗️ Entrenamiento
 
 ### Entrenamiento Básico
 ```bash
@@ -128,7 +140,7 @@ El proyecto implementa las siguientes métricas:
 - **Precision y Recall**
 - **Accuracy**
 
-## 🔧 Características Avanzadas
+## 🛠️ Características Avanzadas
 
 - ✅ **Entrenamiento Distribuido (DDP)** para escalabilidad
 - ✅ **Múltiples Seeds** para reproducibilidad
