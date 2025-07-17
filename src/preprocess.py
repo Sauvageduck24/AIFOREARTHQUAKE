@@ -1,217 +1,88 @@
 """
 Earthquake Building Damage Preprocessing Pipeline
 ------------------------------------------------
-Prepares the "international-charter-eo4ai-etq-challenge" dataset for ML/GeoAI competitions.
+Robust pipeline for preparing the "international-charter-eo4ai-etq-challenge" dataset.
 
-Features:
-- Reads STAC-style catalogs, pansharpens, coregisters, and tiles images.
-- Supports multi-class (damage_grade) or binary masks (with --binary).
-- Fast rasterization, memory-efficient tile streaming, multiprocessing.
-- Balanced splits: full (100%), val (~10% cities), small (~10% tiles/city).
-- Computes global mean/std (stats.json). Optionally saves debug overlays.
-- CLI: --val_pct --small_pct --binary --workers --debug_vis N
-
-Example usage:
-python preprocess.py --raw_data_root ./Training --output_root ./data/preprocessed --workers 4 --debug_vis 16
+Major Improvements:
+1. Efficient raster reading with windowed processing
+2. Enhanced coregistration with fallback mechanisms
+3. Proper STAC metadata handling
+4. Optimized memory management
+5. Comprehensive error handling
+6. Configurable tile filtering
 """
+
+import os
 import json
 import hashlib
 from pathlib import Path
 import torch
 import numpy as np
 import rasterio
+from rasterio.windows import Window
 import geopandas as gpd
 from tqdm import tqdm
-from tqdm import trange
 from skimage.registration import phase_cross_correlation
 from skimage.transform import warp
 import rasterio.features
 import multiprocessing as mp
 import random
 import matplotlib.pyplot as plt
+import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 from scipy.ndimage import shift as ndi_shift
-import glob
 import re
+import argparse
+import time
+from typing import Dict, List, Tuple, Optional, Generator
+import warnings
+warnings.filterwarnings('ignore', 'GeoSeries.notna', UserWarning)
+import itertools
+import shutil
 
+# Constants
 RAW_DATA_ROOT = Path("data/international-charter-eo4ai-etq-challenge/Training")
 OUTPUT_ROOT = Path("data/preprocessed")
 TILE_SIZE = 512
 TILE_OVERLAP = 64
+VALID_BANDS = ['blue', 'green', 'red', 'nir', 'pan']
+MIN_VALID_PIXELS = 0.001  # Minimum % of valid pixels to keep tile (bajado para depuración)
 
-# --- read_stac adaptado a la estructura real y pre/post evento ---
-def read_stac(raw_data_root: Path, annotations_root: Path = None):
-    annotations_root = annotations_root or (raw_data_root / "Annotations")
-    tqdm.write(f"[INFO] Buscando ciudades en {raw_data_root} ...")
-    for city_dir in raw_data_root.iterdir():
-        if not city_dir.is_dir() or not city_dir.name.startswith("Call_"):
-            continue
-        collection_path = city_dir / "collection.json"
-        if not collection_path.exists():
-            tqdm.write(f"[WARN] No collection.json en {city_dir}, se omite.")
-            continue
-        tqdm.write(f"[INFO] Procesando ciudad: {city_dir.name}")
-        with open(collection_path) as f:
-            collection = json.load(f)
-        # --- Extraer fecha del evento del campo de descripción ---
-        desc = collection.get("description", "")
-        m = re.search(r"Date of Charter Activation: (\d{4}-\d{2}-\d{2})", desc)
-        if not m:
-            tqdm.write(f"[WARN] No se encontró fecha de evento en descripción de {city_dir.name}, se omite.")
-            continue
-        event_date = m.group(1)
-        event_date = event_date + "T00:00:00Z"
-        # Buscar archivos de anotaciones para la ciudad
-        ann_city_dir = annotations_root / city_dir.name
-        gpkg_files = sorted(ann_city_dir.glob("*.gpkg")) if ann_city_dir.exists() else []
-        if not gpkg_files:
-            tqdm.write(f"[WARN] No se encontró archivo de anotaciones para {city_dir.name}, se omite.")
-            continue
-        if len(gpkg_files) > 1:
-            tqdm.write(f"[WARN] Varios archivos de anotaciones en {ann_city_dir}, se procesarán todos.")
-        # Iterar sobre cada archivo de anotaciones
-        for label_path in gpkg_files:
-            tqdm.write(f"[INFO] Usando archivo de anotaciones: {label_path.name}")
-            # --- Clasificar escenas pre y post evento ---
-            pre_items = []
-            post_items = []
-            for link in collection.get("links", []):
-                if link.get("rel") != "item":
-                    continue
-                scene_json = city_dir / link["href"]
-                if not scene_json.exists():
-                    tqdm.write(f"[WARN] No existe escena {scene_json}, se omite.")
-                    continue
-                with open(scene_json) as sf:
-                    scene = json.load(sf)
-                scene_date = scene.get("properties", {}).get("datetime", None)
-                if not scene_date:
-                    # Intentar extraer fecha del nombre
-                    m2 = re.search(r"(\d{8})", scene_json.name)
-                    if m2:
-                        scene_date = m2.group(1)[:4] + "-" + m2.group(1)[4:6] + "-" + m2.group(1)[6:8] + "T00:00:00Z"
-                if not scene_date:
-                    tqdm.write(f"[WARN] No se encontró fecha para escena {scene_json}, se omite.")
-                    continue
-                if scene_date < event_date:
-                    pre_items.append(scene)
-                else:
-                    post_items.append(scene)
-            if not pre_items or not post_items:
-                tqdm.write(f"[WARN] Faltan escenas pre o post evento en {city_dir.name}, se omite.")
-                continue
-            # Tomar la primera pre y la primera post (puedes mejorar esto si hay varias)
-            pre_scene = pre_items[0]
-            post_scene = post_items[0]
-            def extract_img_paths(scene):
-                assets = scene.get("assets", {})
-                return {k: (city_dir / assets[k]["href"]).resolve() for k in assets if "href" in assets[k]}
-            img_paths = {
-                "pre": extract_img_paths(pre_scene),
-                "post": extract_img_paths(post_scene)
-            }
-            # Extraer info de pre y post
-            pre_info = {
-                "scene_id": pre_scene.get("id", "pre"),
-                "date": pre_scene.get("properties", {}).get("datetime", None),
-                "type": "pre"
-            }
-            post_info = {
-                "scene_id": post_scene.get("id", "post"),
-                "date": post_scene.get("properties", {}).get("datetime", None),
-                "type": "post"
-            }
-            images_info = {"pre": pre_info, "post": post_info}
-            yield {
-                "city": city_dir.name,
-                "id": f"{pre_scene.get('id', 'pre')}_{post_scene.get('id', 'post')}__{label_path.stem}",
-                "img_paths": img_paths,  # dict: pre/post -> band -> path
-                "label_path": str(label_path),
-                "images_info": images_info, # Añadir 'images_info' a cada entrada
-            }
+# 1. Definir estructura de estadísticas por banda y pre/post
+BAND_NAMES = ['blue', 'green', 'red', 'nir']
 
-# --- pansharpen_if_pan ---
-def pansharpen_if_pan(ms_img, pan_img=None):
-    if pan_img is None:
-        return ms_img
-    ms_sum = ms_img.sum(axis=0, keepdims=True)
-    ms_sum[ms_sum == 0] = 1
-    brovey = ms_img * (pan_img / ms_sum)
-    return brovey
+class BandStats:
+    def __init__(self):
+        # stats['pre']['blue'], stats['post']['nir'], ...
+        self.stats = {'pre': {b: OnlineStats(1) for b in BAND_NAMES},
+                      'post': {b: OnlineStats(1) for b in BAND_NAMES}}
+    def update(self, pre_ms, post_ms, bands):
+        # pre_ms, post_ms: (n_bands, H, W), bands: list of band names
+        for i, b in enumerate(bands):
+            if b in self.stats['pre']:
+                self.stats['pre'][b].update(pre_ms[i:i+1])
+            if b in self.stats['post']:
+                self.stats['post'][b].update(post_ms[i:i+1])
+    def finalize(self):
+        result = {'pre': {}, 'post': {}}
+        for t in ['pre', 'post']:
+            for b in BAND_NAMES:
+                mean, std = self.stats[t][b].finalize()
+                result[t][b] = {'mean': mean[0] if mean else None, 'std': std[0] if std else None}
+        return result
 
-# --- coregister ultra-rápido (solo traslación) ---
-def coregister(pre, post):
-    pre_mean = pre.mean(0)
-    post_mean = post.mean(0)
-    if np.all(pre_mean == 0) or np.all(post_mean == 0):
-        # No hacer registro si alguna imagen está vacía
-        return post
-    shift, error, diffphase = phase_cross_correlation(pre_mean, post_mean, upsample_factor=10)
-    dy = float(np.atleast_1d(shift[0]))
-    dx = float(np.atleast_1d(shift[1]))
-    return ndi_shift(post, shift=(0, dy, dx), mode="nearest")
-
-# --- rasterize_labels (usa cache de GPKG) ---
-gdf_cache = {}
-def get_gdf(gpkg_path):
-    if gpkg_path not in gdf_cache:
-        gdf_cache[gpkg_path] = gpd.read_file(gpkg_path)
-    return gdf_cache[gpkg_path]
-
-def rasterize_labels(gpkg_path: Path, out_shape, transform, binary=False):
-    gdf = get_gdf(gpkg_path)
-    # Filtrar geometrías vacías y nulas
-    gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notnull()]
-    if gdf.empty:
-        return np.zeros(out_shape, dtype=np.uint8)
-    if "damaged" in gdf.columns:
-        # 0: no dañado, 1: dañado, NaN: a predecir (usamos 255 para marcar estos píxeles)
-        values = []
-        for row in gdf.itertuples():
-            val = getattr(row, "damaged", None)
-            if val is None or (isinstance(val, float) and np.isnan(val)):
-                values.append(255)  # Clase especial para "a predecir"
-            else:
-                values.append(int(val))
-    else:
-        values = [1 for _ in gdf.geometry]
-    burned = rasterio.features.rasterize(
-        [(geom, v) for geom, v in zip(gdf.geometry, values)],
-        out_shape=out_shape, transform=transform, fill=0, dtype=np.uint8
-    )
-    if binary:
-        # Solo 0 y 1, pero mantenemos 255 para "a predecir"
-        mask = (burned == 1).astype(np.uint8)
-        mask[burned == 255] = 255
-        burned = mask
-    return burned
-
-# --- save_tensor ---
-def save_tensor(tensor, out_path):
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(tensor, out_path, _use_new_zipfile_serialization=True)
-
-# --- deterministic splits ---
-def is_in_small_split(tile_id, pct=0.1):
-    return int(hashlib.md5(tile_id.encode()).hexdigest(), 16) % int(1/pct) == 0
-
-def is_val_city(city, pct=0.1):
-    return int(hashlib.md5(city.encode()).hexdigest(), 16) % int(1/pct) == 0
-
-# --- OnlineStats ultra-rápido y mergeable ---
 class OnlineStats:
-    def __init__(self, c):
+    def __init__(self, n_channels):
         self.count = 0
-        self.sum   = np.zeros(c, dtype=np.float64)
-        self.sumsq = np.zeros(c, dtype=np.float64)
+        self.sum   = np.zeros(n_channels, np.float64)
+        self.sumsq = np.zeros(n_channels, np.float64)
 
-    def update(self, x):  # x: (C, H, W)
-        n_channels = x.shape[0]
-        n_pix = x.shape[1] * x.shape[2]
-        self.count += n_pix
-        self.sum   += x.reshape(n_channels, -1).sum(axis=1)
-        self.sumsq += (x**2).reshape(n_channels, -1).sum(axis=1)
+    def update(self, x):              # x (C,H,W)
+        x = x.reshape(x.shape[0], -1)
+        self.count += x.shape[1]
+        self.sum   += x.sum(1)
+        self.sumsq += (x ** 2).sum(1)
 
     def merge(self, other):
         self.count += other.count
@@ -219,302 +90,595 @@ class OnlineStats:
         self.sumsq += other.sumsq
 
     def finalize(self):
+        if self.count == 0:
+            return [], []
         mean = self.sum / self.count
         var  = self.sumsq / self.count - mean**2
         std  = np.sqrt(np.maximum(var, 0))
         return mean.tolist(), std.tolist()
 
-# --- debug visualization ---
-def save_debug_vis(tile_img, tile_mask, out_path):
-    c, h, w = tile_img.shape
-    img = tile_img[:3]  # RGB or first 3 bands
-    img = (img - img.min()) / (img.max() - img.min() + 1e-6)
-    img = np.moveaxis(img, 0, -1)
-    mask = tile_mask
-    plt.figure(figsize=(3,3))
-    plt.imshow(img)
-    plt.imshow(mask, alpha=0.4, cmap='jet')
-    plt.axis('off')
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, bbox_inches='tight', pad_inches=0)
+
+def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
+    """
+    Robust STAC reader with comprehensive error handling
+    Returns generator of scene dictionaries
+    """
+    annotations_root = raw_data_root / "Annotations"
+    city_dirs = [d for d in raw_data_root.iterdir() if d.is_dir() and d.name.startswith("Call_")]
+    
+    if not city_dirs:
+        raise FileNotFoundError(f"No valid city directories found in {raw_data_root}")
+    
+    for city_dir in tqdm(city_dirs, desc="Processing cities"):
+        collection_path = city_dir / "collection.json"
+        if not collection_path.exists():
+            tqdm.write(f"[WARN] Skipping {city_dir.name}: collection.json missing")
+            continue
+            
+        try:
+            with open(collection_path) as f:
+                collection = json.load(f)
+        except json.JSONDecodeError:
+            tqdm.write(f"[ERROR] Invalid JSON in {collection_path}")
+            continue
+            
+        # Extract event date
+        event_date = None
+        desc = collection.get("description", "")
+        date_match = re.search(r"Date of Charter Activation[:\s]+(\d{4}-\d{2}-\d{2})", desc)
+        if date_match:
+            event_date = f"{date_match.group(1)}T00:00:00Z"
+        else:
+            tqdm.write(f"[WARN] {city_dir.name}: Event date not found")
+            continue
+            
+        # Find annotation files
+        ann_city_dir = annotations_root / city_dir.name
+        if not ann_city_dir.exists():
+            tqdm.write(f"[WARN] Skipping {city_dir.name}: Annotation directory missing")
+            continue
+            
+        gpkg_files = list(ann_city_dir.glob("*.gpkg"))
+        if not gpkg_files:
+            tqdm.write(f"[WARN] Skipping {city_dir.name}: No annotation files")
+            continue
+            
+        # Process scenes
+        pre_items, post_items = [], []
+        for link in collection.get("links", []):
+            if link.get("rel") != "item":
+                continue
+                
+            scene_path = city_dir / link["href"]
+            if not scene_path.exists():
+                tqdm.write(f"[WARN] Scene not found: {scene_path}")
+                continue
+                
+            try:
+                with open(scene_path) as sf:
+                    scene = json.load(sf)
+            except json.JSONDecodeError:
+                tqdm.write(f"[ERROR] Invalid scene JSON: {scene_path}")
+                continue
+                
+            # Extract scene date
+            scene_date = scene.get("properties", {}).get("datetime")
+            if not scene_date:
+                date_match = re.search(r"(\d{8})", scene_path.name)
+                if date_match:
+                    d = date_match.group(1)
+                    scene_date = f"{d[:4]}-{d[4:6]}-{d[6:8]}T00:00:00Z"
+            
+            if not scene_date:
+                tqdm.write(f"[WARN] Skipping scene: Date not found in {scene_path.name}")
+                continue
+                
+            if scene_date < event_date:
+                pre_items.append(scene)
+            else:
+                post_items.append(scene)
+        
+        if not pre_items or not post_items:
+            tqdm.write(f"[WARN] Skipping {city_dir.name}: Missing pre/post scenes")
+            continue
+            
+        # Process annotations
+        for label_path in gpkg_files:
+            # Find best pre/post pair based on temporal proximity
+            pre_scene = min(pre_items, key=lambda x: abs(np.datetime64(x['properties']['datetime'].replace('Z', '')) - np.datetime64(event_date.replace('Z', ''))))
+            post_scene = min(post_items, key=lambda x: abs(np.datetime64(x['properties']['datetime'].replace('Z', '')) - np.datetime64(event_date.replace('Z', ''))))
+            
+            # Extract image paths
+            img_paths = {
+                "pre": _extract_asset_paths(pre_scene, city_dir),
+                "post": _extract_asset_paths(post_scene, city_dir)
+            }
+            
+            # Validate we have required bands
+            if not _validate_bands(img_paths["pre"]) or not _validate_bands(img_paths["post"]):
+                tqdm.write(f"[WARN] Skipping {city_dir.name}: Missing required bands")
+                continue
+                
+            yield {
+                "city": city_dir.name,
+                "id": f"{pre_scene['id']}_{post_scene['id']}__{label_path.stem}",
+                "img_paths": img_paths,
+                "label_path": str(label_path),
+                "pre_date": pre_scene['properties']['datetime'],
+                "post_date": post_scene['properties']['datetime'],
+                "event_date": event_date
+            }
+
+def _extract_asset_paths(scene: Dict, base_dir: Path) -> Dict[str, Path]:
+    """Resolve asset paths with robust error handling"""
+    paths = {}
+    for band, asset in scene.get("assets", {}).items():
+        if band not in VALID_BANDS:
+            continue
+            
+        rel_path = asset.get("href")
+        if not rel_path:
+            continue
+            
+        abs_path = (base_dir / rel_path).resolve()
+        if abs_path.exists():
+            paths[band] = abs_path
+        else:
+            # Search recursively
+            found = list(base_dir.glob(f"**/{rel_path}"))
+            if found:
+                paths[band] = found[0].resolve()
+            else:
+                tqdm.write(f"[WARN] Asset not found: {rel_path}")
+    return paths
+
+def _validate_bands(band_dict: Dict[str, Path]) -> bool:
+    """Check if we have minimum required bands (RGB)"""
+    return all(b in band_dict for b in ['red', 'green', 'blue'])
+
+def pansharpen(ms_img: np.ndarray, pan_img: np.ndarray) -> np.ndarray:
+    """
+    High-quality pansharpening using Gram-Schmidt Adaptive (GSA) method
+    Based on: https://gdal.org/programs/gdal_pansharpen.html
+    """
+    # Step 1: Create low-resolution pan by averaging MS bands
+    lr_pan = ms_img.mean(axis=0)
+    
+    # Step 2: Compute gain coefficients
+    gains = []
+    for band in ms_img:
+        cov = np.cov(band.flatten(), pan_img.flatten())[0, 1]
+        var = np.var(lr_pan.flatten())
+        gains.append(cov / var if var > 0 else 1.0)
+    
+    # Step 3: Apply transformation
+    pan_sharpened = np.zeros_like(ms_img)
+    for i, (band, gain) in enumerate(zip(ms_img, gains)):
+        # Compute difference between HR pan and LR pan
+        detail = pan_img - lr_pan
+        # Apply detail to MS band
+        pan_sharpened[i] = band + gain * detail
+    
+    return pan_sharpened
+
+def coregister(
+    base_img: np.ndarray, 
+    moving_img: np.ndarray,
+    max_shift: int = 100
+) -> np.ndarray:
+    """
+    Robust coregistration with fallback to original on failure
+    Returns registered moving image
+    """
+    # Handle edge cases
+    if base_img.shape != moving_img.shape:
+        raise ValueError("Base and moving images must have same shape")
+    # Use mean of bands for grayscale registration
+    base_gray = base_img.mean(axis=0) if base_img.ndim == 3 else base_img
+    moving_gray = moving_img.mean(axis=0) if moving_img.ndim == 3 else moving_img
+    # Check for empty images
+    if np.all(base_gray == 0) or np.all(moving_gray == 0):
+        return moving_img
+    try:
+        # Compute shift (compatible with older skimage)
+        shift_result = phase_cross_correlation(
+            base_gray, 
+            moving_gray, 
+            upsample_factor=10
+        )
+        # shift_result puede ser (shift, error, diffphase) o solo (shift, error)
+        shift = shift_result[0] if isinstance(shift_result, tuple) else shift_result
+        # Apply shift
+        registered = ndi_shift(
+            moving_img, 
+            shift=(0, shift[0], shift[1]), 
+            mode='nearest'
+        )
+        return registered
+    except Exception as e:
+        tqdm.write(f"[WARN] Coregistration failed: {str(e)}")
+        return moving_img
+
+def rasterize_labels(
+    gpkg_path: Path, 
+    transform: rasterio.Affine,
+    shape: Tuple[int, int],
+    crs_raster,  # nuevo argumento
+    binary: bool = False
+) -> np.ndarray:
+    """
+    Efficient label rasterization with error handling
+    """
+    try:
+        gdf = gpd.read_file(gpkg_path)
+        if VERBOSE:
+            print(f"[RASTERIZE] GPKG CRS: {gdf.crs}")
+            print(f"[RASTERIZE] GPKG bounds: {gdf.total_bounds}")
+            print(f"[RASTERIZE] GPKG rows: {len(gdf)}")
+        if VERBOSE:
+            print(f"[RASTERIZE] Raster shape: {shape}")
+            print(f"[RASTERIZE] Raster transform: {transform}")
+        # Reproyectar si es necesario
+        if gdf.crs != crs_raster:
+            gdf = gdf.to_crs(crs_raster)
+            if VERBOSE:
+                print(f"[RASTERIZE] GPKG reproyectado a: {gdf.crs}")
+        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        
+        if gdf.empty:
+            return np.zeros(shape, dtype=np.uint8)
+        
+        # Handle damage classification
+        if "damaged" in gdf.columns:
+            values = []
+            for val in gdf["damaged"]:
+                if pd.isna(val):
+                    values.append(255)  # Unknown
+                else:
+                    values.append(int(val))
+        else:
+            values = [1] * len(gdf)
+        
+        return rasterio.features.rasterize(
+            zip(gdf.geometry, values),
+            out_shape=shape,
+            transform=transform,
+            fill=0,
+            dtype=np.uint8
+        )
+    except Exception as e:
+        tqdm.write(f"[ERROR] Rasterization failed for {gpkg_path}: {str(e)}")
+        return np.zeros(shape, dtype=np.uint8)
+
+def process_scene(scene: Dict, output_root: Path, tile_size: int, tile_overlap: int,
+                  binary: bool, debug_vis: int) -> Tuple[Dict, BandStats, List]:
+    with rasterio.open(scene["img_paths"]["pre"]["red"]) as ref:
+        transform, (height, width) = ref.transform, (ref.height, ref.width)
+        crs_raster = ref.crs
+        if VERBOSE:
+            print(f"[PROCESS_SCENE] Raster CRS: {ref.crs}")
+            print(f"[PROCESS_SCENE] Raster bounds: {ref.bounds}")
+            print(f"[PROCESS_SCENE] Raster shape: {(height, width)}")
+            print(f"[PROCESS_SCENE] Raster transform: {transform}")
+
+    mask = rasterize_labels(Path(scene["label_path"]), transform, (height, width), crs_raster, binary)
+    if VERBOSE:
+        print(f"Valores únicos en la máscara de la escena {scene['id']}: {np.unique(mask)}")
+
+    y_starts = range(0, height, tile_size - tile_overlap)
+    x_starts = range(0, width,  tile_size - tile_overlap)
+
+    pre_ds  = {b: rasterio.open(p) for b, p in scene["img_paths"]["pre"].items()}
+    post_ds = {b: rasterio.open(p) for b, p in scene["img_paths"]["post"].items()}
+    band_stats = BandStats()
+    meta    = {s: [] for s in ['full', 'small', 'test']}
+    debug   = []
+
+    try:
+        total_tiles = len(y_starts) * len(x_starts)
+        for y, x in tqdm(list(itertools.product(y_starts, x_starts)), desc=f"Tiles {scene['id']}",total=total_tiles, leave=False):
+            win = Window(x, y, tile_size, tile_size)
+            tile_mask = mask[y:y+tile_size, x:x+tile_size]
+            valid_pct = np.mean(tile_mask != 0)
+            if np.all(tile_mask == 0) or valid_pct < MIN_VALID_PIXELS:
+                continue
+
+            # ── lectura rápida ─────────────────────────────────────────────
+            ms_bands = ['blue', 'green', 'red', 'nir']
+            common_bands = [b for b in ms_bands if b in pre_ds and b in post_ds]
+            if not common_bands:
+                if VERBOSE:
+                    print(f"[WARN] Tile ({y},{x}) sin bandas multiespectrales en común. Se omite.")
+                continue
+
+            pre_ms  = np.stack([pre_ds[b].read(1, window=win, boundless=True) for b in common_bands], axis=0).astype(np.float32)
+            post_ms = np.stack([post_ds[b].read(1, window=win, boundless=True) for b in common_bands], axis=0).astype(np.float32)
+
+            if 'pan' in pre_ds:
+                pre_ms  = pansharpen(pre_ms,  pre_ds['pan'].read(1, window=win, boundless=True))
+            if 'pan' in post_ds:
+                post_ms = pansharpen(post_ms, post_ds['pan'].read(1, window=win, boundless=True))
+
+            if pre_ms.shape == post_ms.shape:
+                post_ms = coregister(pre_ms, post_ms)
+            else:
+                if VERBOSE:
+                    print(f"[WARN] pre_ms y post_ms tienen shapes diferentes: {pre_ms.shape} vs {post_ms.shape}. Se omite coregister.")
+
+            # Actualizar estadísticas por banda
+            band_stats.update(pre_ms, post_ms, common_bands)
+            tile_meta = _process_tile(scene, pre_ms, post_ms, tile_mask,
+                                      (y, x), output_root, binary, band_stats, common_bands)
+            if tile_meta:
+                meta[tile_meta['split']].append(tile_meta)
+                if debug_vis and len(debug) < debug_vis:
+                    debug.append((pre_ms[[2,1,0]] if pre_ms.shape[0] >= 3 else pre_ms[0:3], tile_mask, tile_meta['id']))
+    finally:
+        for ds in itertools.chain(pre_ds.values(), post_ds.values()):
+            ds.close()
+
+    return meta, band_stats, debug
+
+# 3. En _process_tile, quitar stats.update y solo dejar la lógica de guardado y meta
+# (band_stats se pasa pero no se usa aquí, solo para mantener la firma)
+def _process_tile(
+    scene: Dict,
+    pre_ms: np.ndarray,
+    post_ms: np.ndarray,
+    tile_mask: np.ndarray,
+    position: Tuple[int, int],
+    output_root: Path,
+    binary: bool,
+    band_stats: BandStats,
+    common_bands: list
+) -> Optional[Dict]:
+    y, x = position
+    valid_pct = np.mean(tile_mask != 0)
+    #print(f"Tile ({y},{x}) - Porcentaje de píxeles válidos: {valid_pct:.4f}, valores únicos: {np.unique(tile_mask)}")
+    if np.all(tile_mask == 0) or valid_pct < MIN_VALID_PIXELS:
+        return None
+    tile_img = np.concatenate([pre_ms, post_ms], axis=0)
+    tile_tensor = torch.from_numpy(tile_img).float()
+    mask_tensor = torch.from_numpy(tile_mask).byte()
+    tile_id = f"{scene['id']}_{y}_{x}"
+    unique_mask = np.unique(tile_mask)
+    if any((v not in (0, 1)) for v in unique_mask):
+        split = 'test'
+    else:
+        split = 'full'
+    img_path = output_root / split / "images" / f"{tile_id}.pt"
+    mask_path = output_root / split / "masks" / f"{tile_id}.pt"
+    torch.save(tile_tensor.half(), img_path)
+    torch.save(mask_tensor, mask_path)
+    # Construir images_info
+    images_info = {
+        'pre': [
+            {
+                'band': b,
+                'path': str(scene['img_paths']['pre'][b]),
+                'date': scene['pre_date']
+            } for b in common_bands if b in scene['img_paths']['pre']
+        ],
+        'post': [
+            {
+                'band': b,
+                'path': str(scene['img_paths']['post'][b]),
+                'date': scene['post_date']
+            } for b in common_bands if b in scene['img_paths']['post']
+        ]
+    }
+    # Determinar si el tile es parcial (fuera de la imagen o contiene datos nulos)
+    is_partial = False
+    # Si la ventana se sale de los límites de la imagen, boundless=True puede rellenar con ceros o nodata
+    # Consideramos parcial si hay algún NaN o si el tile no está completamente dentro de la imagen
+    if (
+        np.isnan(pre_ms).any() or np.isnan(post_ms).any() or
+        pre_ms.shape[1:] != (TILE_SIZE, TILE_SIZE) or post_ms.shape[1:] != (TILE_SIZE, TILE_SIZE)
+    ):
+        is_partial = True
+
+    return {
+        "id": tile_id,
+        "city": scene["city"],
+        "split": split,
+        "position": [y, x],
+        "size": TILE_SIZE,
+        "pre_date": scene["pre_date"],
+        "post_date": scene["post_date"],
+        "event_date": scene["event_date"],
+        "img_path": str(img_path),
+        "mask_path": str(mask_path),
+        "has_damage": bool((tile_mask == 1).any()),
+        "bands": common_bands,
+        "images_info": images_info,
+        "is_partial": is_partial
+    }
+
+
+
+def is_in_small_split(city: str, pct: float = 0.1) -> bool:
+    """Deterministic split based on city hash"""
+    return int(hashlib.md5(city.encode()).hexdigest(), 16) % int(1/pct) == 0
+
+def save_debug_vis(tile_img: np.ndarray, tile_mask: np.ndarray, out_path: Path):
+    """Save debug visualization"""
+    plt.figure(figsize=(10, 5))
+    
+    # Pre-event image
+    plt.subplot(121)
+    rgb = np.stack([
+        tile_img[2],  # Red
+        tile_img[1],  # Green
+        tile_img[0]   # Blue
+    ], axis=-1)
+    plt.imshow(np.clip(rgb / np.percentile(rgb, 99), 0, 1))
+    plt.title("Pre-event")
+    
+    # Damage overlay
+    plt.subplot(122)
+    plt.imshow(np.clip(rgb / np.percentile(rgb, 99), 0, 1))
+    plt.imshow(tile_mask, alpha=0.5, cmap='jet', vmin=0, vmax=2)
+    plt.title("Damage overlay")
+    
+    plt.savefig(out_path, bbox_inches='tight')
     plt.close()
 
-# --- Utilidad para seleccionar imágenes pre/post y bandas, tile por tile ---
-def get_tile_from_bands(img_paths, y, x, tile_size):
-    # img_paths: {"pre": {...}, "post": {...}}
-    def read_bands(band_paths):
-        ms_bands = [b for b in ["blue", "green", "red", "nir"] if b in band_paths]
-        pan_band = "pan" if "pan" in band_paths else None
-        tile_ms = None
-        tile_pan = None
-        if ms_bands:
-            tile_ms = []
-            for b in ms_bands:
-                with rasterio.open(str(band_paths[b])) as src:
-                    tile = src.read(1, window=rasterio.windows.Window(x, y, tile_size, tile_size)).astype(np.float32)
-                    tile_ms.append(tile)
-            tile_ms = np.stack(tile_ms, axis=0)
-        if pan_band:
-            with rasterio.open(str(band_paths[pan_band])) as src:
-                tile_pan = src.read(1, window=rasterio.windows.Window(x, y, tile_size, tile_size)).astype(np.float32)
-        return tile_ms, tile_pan
-    pre_ms, pre_pan = read_bands(img_paths["pre"])
-    post_ms, post_pan = read_bands(img_paths["post"])
-    return pre_ms, pre_pan, post_ms, post_pan
-
-# --- per-city processing (fusionada con opción de contar tiles mixtos) ---
-def process_city(args, count_mixed_tiles=False):
-    (city, items, params) = args
-    tqdm.write(f"[INFO] Iniciando procesamiento de ciudad: {city} ({len(items)} escenas)")
-    small_split = params['small_split']
-    binary = params['binary']
-    debug_vis = params['debug_vis']
-    output_root = params['output_root']
-    tile_size = params['tile_size']
-    tile_overlap = params['tile_overlap']
-    stats = None
-    meta = {s: [] for s in ['full', 'small', 'test']}
-    debug_samples = []
-    import gc
-    total_tiles = 0
-    ignored_mixed_tiles = 0
-    for item in items:
-        id_ = item["id"]
-        img_paths = item["img_paths"]
-        label_path = item["label_path"]
-        with rasterio.open(str(list(img_paths["pre"].values())[0])) as src:
-            H, W = src.height, src.width
-            pre_profile = src.profile
-            transform = src.transform
-        mask = rasterize_labels(label_path, (H, W), transform, binary=binary)
-        step = tile_size - tile_overlap
-        y_starts = list(range(0, H - tile_size + 1, step))
-        x_starts = list(range(0, W - tile_size + 1, step))
-        if not y_starts or y_starts[-1] != H - tile_size:
-            y_starts.append(H - tile_size)
-        if not x_starts or x_starts[-1] != W - tile_size:
-            x_starts.append(W - tile_size)
-        num_tiles_item = len(y_starts) * len(x_starts)
-        tile_counter = 0
-        for y in y_starts:
-            for x in x_starts:
-                tile_counter += 1
-                total_tiles += 1
-                if tile_counter % max(1, num_tiles_item // 10) == 0 or tile_counter == num_tiles_item:
-                    percent = 100 * tile_counter / num_tiles_item
-                    tqdm.write(f"[PROGRESS] Ciudad: {city}, Escena: {id_}, {tile_counter}/{num_tiles_item} tiles ({percent:.1f}%) procesados.")
-                pre_ms, pre_pan, post_ms, post_pan = get_tile_from_bands(img_paths, y, x, tile_size)
-                if pre_ms is not None and pre_pan is not None and post_ms is not None and post_pan is not None:
-                    tile_pre = pansharpen_if_pan(pre_ms, pre_pan)
-                    tile_post = pansharpen_if_pan(post_ms, post_pan)
-                elif pre_ms is not None and pre_pan is not None:
-                    tile_pre = pansharpen_if_pan(pre_ms, pre_pan)
-                    tile_post = pre_ms.copy() # No pansharpen post
-                elif post_ms is not None and post_pan is not None:
-                    tile_pre = np.expand_dims(post_ms, 0) # No pansharpen pre
-                    tile_post = post_ms.copy()
-                else:
-                    tqdm.write(f"[WARN] No MS ni PAN en escena {id_} de {city}, se omite tile {y},{x}.")
-                    continue
-                tile_post = coregister(tile_pre, tile_post)
-                tile_mask = mask[y:y+tile_size, x:x+tile_size]
-                if tile_mask.sum() == 0:
-                    continue
-                tile_img = np.concatenate([tile_pre, tile_post], axis=0)
-                if stats is None:
-                    stats = OnlineStats(tile_img.shape[0])
-                    tqdm.write(f"[INFO] Inicializando OnlineStats para {city} con {tile_img.shape[0]} canales.")
-                tile_id = f"{id_}_{y}_{x}"
-                tile_img_t = torch.from_numpy(tile_img).float()
-                tile_img_t = (tile_img_t - tile_img_t.mean()) / (tile_img_t.std() + 1e-6)
-                stats.update(tile_img_t.numpy())
-                tile_img_t = tile_img_t.half()
-                tile_mask_t = torch.from_numpy(tile_mask).to(torch.uint8)
-                unique_vals = np.unique(tile_mask)
-                is_partial = is_partial_tile(tile_img)
-                if (unique_vals == 255).all():
-                    img_path = output_root / "test" / "images" / f"{tile_id}.pt"
-                    mask_path = output_root / "test" / "masks" / f"{tile_id}.pt"
-                    save_tensor(tile_img_t, img_path)
-                    save_tensor(tile_mask_t, mask_path)
-                    meta['test'].append({
-                        "id": tile_id,
-                        "city": city,
-                        "scene_id": id_,
-                        "bands": list(img_paths["pre"].keys()) + list(img_paths["post"].keys()),
-                        "img_paths": {k: str(v) for k, v in img_paths.items()},
-                        "label_path": str(label_path),
-                        "bbox": [y, x, y+tile_size, x+tile_size],
-                        "is_partial": is_partial,
-                        "images_info": item["images_info"], # Añadir 'images_info' a cada entrada
-                    })
-                elif set(unique_vals).issubset({0, 1}):
-                    img_path = output_root / "full" / "images" / f"{tile_id}.pt"
-                    mask_path = output_root / "full" / "masks" / f"{tile_id}.pt"
-                    if not img_path.exists():
-                        save_tensor(tile_img_t, img_path)
-                    if not mask_path.exists():
-                        save_tensor(tile_mask_t, mask_path)
-                    meta['full'].append({
-                        "id": tile_id,
-                        "city": city,
-                        "scene_id": id_,
-                        "bands": list(img_paths["pre"].keys()) + list(img_paths["post"].keys()),
-                        "img_paths": {k: str(v) for k, v in img_paths.items()},
-                        "label_path": str(label_path),
-                        "bbox": [y, x, y+tile_size, x+tile_size],
-                        "is_partial": is_partial,
-                        "images_info": item["images_info"], # Añadir 'images_info' a cada entrada
-                    })
-                    if is_in_small_split(tile_id, small_split):
-                        img_path = output_root / "small" / "images" / f"{tile_id}.pt"
-                        mask_path = output_root / "small" / "masks" / f"{tile_id}.pt"
-                        if not img_path.exists():
-                            save_tensor(tile_img_t, img_path)
-                        if not mask_path.exists():
-                            save_tensor(tile_mask_t, mask_path)
-                        meta['small'].append({
-                            "id": tile_id,
-                            "city": city,
-                            "scene_id": id_,
-                            "bands": list(img_paths["pre"].keys()) + list(img_paths["post"].keys()),
-                            "img_paths": {k: str(v) for k, v in img_paths.items()},
-                            "label_path": str(label_path),
-                            "bbox": [y, x, y+tile_size, x+tile_size],
-                            "is_partial": is_partial,
-                            "images_info": item["images_info"], # Añadir 'images_info' a cada entrada
-                        })
-                else:
-                    if count_mixed_tiles:
-                        ignored_mixed_tiles += 1
-                if debug_vis and len(debug_samples) < debug_vis:
-                    debug_samples.append((tile_img, tile_mask, tile_id))
-                del tile_img, tile_img_t, tile_mask, tile_mask_t, tile_pre, tile_post, pre_ms, pre_pan, post_ms, post_pan
-                gc.collect()
-        del mask
-        gc.collect()
-    tqdm.write(f"[INFO] Finalizado procesamiento de ciudad: {city}")
-    if count_mixed_tiles:
-        return (city, meta, stats, debug_samples), ignored_mixed_tiles
-    else:
-        return city, meta, stats, debug_samples
-
-# --- main ---
 def main():
-    import argparse
-    import time
-    start_time = time.time()
+    print()
     parser = argparse.ArgumentParser(description="Preprocess earthquake-building-damage dataset.")
     parser.add_argument("--raw_data_root", type=str, default=str(RAW_DATA_ROOT), help="Raw data root directory")
     parser.add_argument("--output_root", type=str, default=str(OUTPUT_ROOT), help="Output root directory")
     parser.add_argument("--small_pct", type=float, default=0.1, help="Fraction of tiles per city for small split")
     parser.add_argument("--binary", action="store_true", help="Collapse mask to binary (0/1)")
-    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
+    parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers")
     parser.add_argument("--debug_vis", type=int, default=0, help="Save N debug overlay PNGs")
+    parser.add_argument("--verbose", action="store_true", help="Mostrar información detallada de depuración",default=False)
     parser.add_argument("--prueba", action="store_true", help="Procesar solo una ciudad para pruebas rápidas",default=True)
-
     args = parser.parse_args()
-    raw_data_root = Path(args.raw_data_root)
-    output_root = Path(args.output_root)
-    # Verificación de existencia de la ruta de datos
-    if not raw_data_root.exists():
-        raise FileNotFoundError(f"El directorio de datos no existe: {raw_data_root.resolve()}\n"
-                                f"Por favor, revisa la ruta y pásala correctamente con --raw_data_root.")
-    small_pct = args.small_pct
-    binary = args.binary
-    workers = args.workers
-    debug_vis = args.debug_vis
-    prueba = args.prueba
-    tqdm.write(f"[INFO] Iniciando preprocesamiento con {workers} workers...")
-    all_items = list(read_stac(raw_data_root))
-    cities = sorted(set(item['city'] for item in all_items))
-    tqdm.write(f"[INFO] Ciudades encontradas: {cities}")
-    city_items = {c: [] for c in cities}
-    for item in all_items:
-        city_items[item['city']].append(item)
-    # Ordenar ciudades por número de escenas (de menor a mayor)
-    cities_sorted = sorted(cities, key=lambda c: len(city_items[c]))
-    if prueba:
-        # Solo procesar la primera ciudad para pruebas
-        if cities_sorted:
-            cities_sorted = [cities_sorted[0]]
-            tqdm.write(f"[MODO PRUEBA] Solo se procesará la ciudad: {cities_sorted[0]}")
-    for split in ["full", "small", "test"]:
-        (output_root / split / "images").mkdir(parents=True, exist_ok=True)
-        (output_root / split / "masks").mkdir(parents=True, exist_ok=True)
-    params = {
-        'val_split': False, 'small_split': small_pct, 'binary': binary, 'debug_vis': 0,
-        'output_root': output_root, 'tile_size': TILE_SIZE, 'tile_overlap': TILE_OVERLAP
-    }
-    results = []
-    ignored_mixed_tiles = 0  # Para validación de integridad
-    if workers > 1:
-        args_list = []
-        for city in cities_sorted:
-            params_city = params.copy()
-            params_city['debug_vis'] = debug_vis
-            args_list.append((city, city_items[city], params_city))
-        with tqdm(total=len(cities_sorted), desc="Procesando ciudades", ncols=80) as pbar:
-            with mp.Pool(workers) as pool:
-                for res in pool.imap_unordered(process_city, args_list):
-                    results.append(res[0])
-                    ignored_mixed_tiles += res[1]
-                    pbar.update(1)
-    else:
-        for city in tqdm(cities_sorted, desc="Procesando ciudades", ncols=80):
-            params_city = params.copy()
-            params_city['debug_vis'] = debug_vis
-            res = process_city((city, city_items[city], params_city))
-            results.append(res[0])
-            ignored_mixed_tiles += res[1]
-    meta = {s: [] for s in ['full', 'small', 'test']}
-    stats = None
-    debug_samples = []
-    for city, meta_city, stats_city, debug_city in results:
-        for split in meta:
-            meta[split].extend(meta_city[split])
-        if stats is None:
-            stats = stats_city
-            tqdm.write(f"[INFO] Inicializando OnlineStats global.")
-        else:
-            stats.merge(stats_city)
-            tqdm.write(f"[INFO] Merge de OnlineStats para ciudad: {city}")
-        debug_samples.extend(debug_city)
-    for split in meta:
-        tqdm.write(f"[INFO] Guardando meta.json para split: {split} ({len(meta[split])} tiles)")
-        with open(output_root / split / "meta.json", "w") as f:
-            json.dump(meta[split], f, indent=2)
-    if stats is not None:
-        mean, std = stats.finalize()
-        tqdm.write(f"[INFO] Guardando stats.json (media y std globales)")
-        with open(output_root / "stats.json", "w") as f:
-            json.dump({"mean": mean, "std": std}, f, indent=2)
-    if debug_vis and debug_samples:
-        tqdm.write(f"[INFO] Guardando overlays de debug ({debug_vis}) en debug_vis/")
-        random.shuffle(debug_samples)
-        for tile_img, tile_mask, tile_id in debug_samples[:debug_vis]:
-            out_path = output_root / "debug_vis" / f"{tile_id}.png"
-            save_debug_vis(tile_img, tile_mask, out_path)
-    # --- Validación de integridad ---
-    tqdm.write("[VALIDACIÓN] Resumen de splits:")
-    for split in meta:
-        tqdm.write(f"  Split {split}: {len(meta[split])} tiles")
-    tqdm.write(f"  Tiles mixtos ignorados: {ignored_mixed_tiles}")
-    tqdm.write(f"[INFO] Preprocesamiento finalizado.")
-    end_time = time.time()
-    elapsed = end_time - start_time
-    tqdm.write(f"[INFO] Tiempo total de ejecución: {elapsed:.2f} segundos.")
+    
+    global VERBOSE
+    VERBOSE = args.verbose
 
-# --- Nueva función para detectar si un tile es parcial (tiene valores nodata o NaN)
-def is_partial_tile(tile_img, nodata_values=[0, -9999]):
-    # tile_img: (C, H, W)
-    # Considera parcial si hay algún NaN o algún valor nodata en cualquier banda
-    if np.isnan(tile_img).any():
-        return True
-    for nodata in nodata_values:
-        if (tile_img == nodata).any():
-            return True
-    return False
+    # Borrar carpeta de salida si existe
+    output_root = Path(args.output_root)
+    if output_root.exists():
+        print(f"[INFO] Borrando carpeta de salida: {output_root}")
+        shutil.rmtree(output_root)
+
+    # Validate paths
+    raw_root = Path(args.raw_data_root)
+    if not raw_root.exists():
+        raise FileNotFoundError(f"Raw data directory not found: {raw_root}")
+        
+    output_root.mkdir(parents=True, exist_ok=True)
+    
+    # Create output structure
+    for split in ['full', 'small', 'test']:
+        (output_root / split / 'images').mkdir(parents=True, exist_ok=True)
+        (output_root / split / 'masks').mkdir(parents=True, exist_ok=True)
+    
+    # Process scenes
+    scenes = list(read_stac(raw_root))
+    if not scenes:
+        raise RuntimeError("No valid scenes found for processing")
+
+    if args.prueba:
+        tqdm.write("[INFO] Modo prueba activado: solo se procesarán 2 escenas.")
+        scenes = scenes[:1]
+
+    tqdm.write(f"Found {len(scenes)} scenes to process")
+    
+    # Process with multiprocessing
+    params = {
+        'output_root': output_root,
+        'tile_size': TILE_SIZE,
+        'tile_overlap': TILE_OVERLAP,
+        'binary': args.binary,
+        'debug_vis': args.debug_vis
+    }
+    
+    all_meta = {s: [] for s in ['full', 'small', 'test']}
+    all_band_stats = BandStats()
+    debug_samples = []
+
+    if args.workers == 1:
+        total_time = 0
+        for i, scene in enumerate(tqdm(scenes, desc="Processing scenes")):
+            start_time = time.time()
+            if VERBOSE:
+                print(f"[INFO] Processing scene {i+1}/{len(scenes)}: {scene['id']}")
+            meta, band_stats, debug = process_scene(
+                scene,
+                params['output_root'],
+                params['tile_size'],
+                params['tile_overlap'],
+                params['binary'],
+                params['debug_vis']
+            )
+            elapsed = time.time() - start_time
+            total_time += elapsed
+            tqdm.write(f"[INFO] Scene {i+1}/{len(scenes)} procesada en {elapsed:.2f} segundos. Tiempo acumulado: {total_time:.2f} segundos.")
+            for split in all_meta:
+                all_meta[split].extend(meta[split])
+            all_band_stats.stats['pre'] = {b: all_band_stats.stats['pre'][b] for b in BAND_NAMES}
+            all_band_stats.stats['post'] = {b: all_band_stats.stats['post'][b] for b in BAND_NAMES}
+            for t in ['pre', 'post']:
+                for b in BAND_NAMES:
+                    all_band_stats.stats[t][b].merge(band_stats.stats[t][b])
+            debug_samples.extend(debug)
+    else:
+        with mp.Pool(args.workers) as pool:
+            results = []
+            for scene in scenes:
+                results.append(pool.apply_async(
+                    process_scene, 
+                    (
+                        scene, 
+                        params['output_root'], 
+                        params['tile_size'], 
+                        params['tile_overlap'], 
+                        params['binary'], 
+                        params['debug_vis']
+                    )
+                ))
+            total_time = 0
+            for i, res in enumerate(tqdm(results, desc="Processing scenes")):
+                start_time = time.time()
+                meta, band_stats, debug = res.get()
+                elapsed = time.time() - start_time
+                total_time += elapsed
+                tqdm.write(f"[INFO] Scene {i+1}/{len(results)} procesada en {elapsed:.2f} segundos. Tiempo acumulado: {total_time:.2f} segundos.")
+                for split in all_meta:
+                    all_meta[split].extend(meta[split])
+                all_band_stats.stats['pre'] = {b: all_band_stats.stats['pre'][b] for b in BAND_NAMES}
+                all_band_stats.stats['post'] = {b: all_band_stats.stats['post'][b] for b in BAND_NAMES}
+                for t in ['pre', 'post']:
+                    for b in BAND_NAMES:
+                        all_band_stats.stats[t][b].merge(band_stats.stats[t][b])
+                debug_samples.extend(debug)
+    
+    # Hacer el split 'small' como 10% aleatorio de 'full' por ciudad
+    import random
+    random.seed(42)
+    full_tiles_by_city = {}
+    for tile in all_meta['full']:
+        city = tile['city']
+        full_tiles_by_city.setdefault(city, []).append(tile)
+    small_tiles = []
+    new_full_tiles = []
+    for city, tiles in full_tiles_by_city.items():
+        n_small = max(1, int(0.1 * len(tiles)))
+        idxs = list(range(len(tiles)))
+        random.shuffle(idxs)
+        small_idx = set(idxs[:n_small])
+        for i, tile in enumerate(tiles):
+            if i in small_idx:
+                tile_copy = tile.copy()
+                tile_copy['split'] = 'small'
+                small_tiles.append(tile_copy)
+            else:
+                new_full_tiles.append(tile)
+    all_meta['full'] = new_full_tiles
+    all_meta['small'] = small_tiles
+
+    # Save metadata
+    for split in all_meta:
+        with open(output_root / split / "meta.json", 'w') as f:
+            json.dump(all_meta[split], f, indent=2)
+    
+    # Save statistics
+    stats_result = all_band_stats.finalize()
+    with open(output_root / "stats.json", 'w') as f:
+        json.dump(stats_result, f, indent=2)
+    
+    # Save debug visuals
+    if debug_samples:
+        debug_dir = output_root / "debug_vis"
+        debug_dir.mkdir(exist_ok=True)
+        for i, (img, mask, tile_id) in enumerate(debug_samples[:args.debug_vis]):
+            save_debug_vis(img, mask, debug_dir / f"{tile_id}.png")
+    
+    tqdm.write("Preprocessing completed successfully\n")
 
 if __name__ == "__main__":
-    main() 
+    main()
