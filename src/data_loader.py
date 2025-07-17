@@ -21,6 +21,7 @@ from loguru import logger
 from .config import Config
 from .transforms import get_transforms
 
+// modificar este archivo para que si se ejecuta (if __name__=='__main__'), entonces, se creen dataset, dataloader y se guarden en memoria.
 
 class EarthquakeDataset(Dataset):
     """
