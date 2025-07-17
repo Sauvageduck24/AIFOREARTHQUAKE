@@ -175,3 +175,9 @@ Para preguntas sobre este proyecto, abrir un issue en GitHub.
 ---
 
 **Nota**: Este proyecto es parte de la competición [AI for Earthquake Response](https://platform.ai4eo.eu/ai-for-earthquake-response). Los datos están sujetos a restricciones de acceso y deben ser solicitados manualmente al equipo organizador. 
+
+## 👥 Autores
+
+El equipo **MM** está formado por:
+- Esteban Sánchez Gámez
+- Pablo Delgado Muñoz 
