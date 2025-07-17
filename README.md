@@ -78,6 +78,48 @@ data/
 └── splits/                 # Particiones train/val/test
 ```
 
+### Detalles técnicos del preprocesamiento (`src/preprocess.py`)
+
+El script de preprocesamiento divide las imágenes satelitales en pequeños parches (tiles) y genera las máscaras de daño asociadas, listas para el entrenamiento. A continuación se detallan los aspectos clave:
+
+- **Tiling configurable:**
+  - `TILE_SIZE`: Tamaño de cada tile cuadrado (por defecto 512x512 píxeles).
+  - `TILE_OVERLAP`: Solapamiento entre tiles adyacentes (por defecto 64 píxeles), lo que permite que los objetos en los bordes aparezcan completos en varios tiles.
+  - El tiling recorre la imagen en pasos de `TILE_SIZE - TILE_OVERLAP`.
+
+- **Filtrado de tiles:**
+  - `MIN_VALID_PIXELS`: Porcentaje mínimo de píxeles válidos (no fondo) requerido para guardar un tile. Tiles con menos proporción de píxeles útiles se descartan automáticamente.
+
+- **Máscaras y clases:**
+  - La máscara rasterizada se genera a partir de la columna `damaged` de las anotaciones vectoriales.
+  - Si se usa el flag `--binary`, la máscara es binaria: 0 = no dañado, 1 = dañado, 255 = desconocido (NaN, None, valores inesperados).
+  - Los tiles que contienen algún valor 255 (desconocido) en la máscara se asignan al split `test` y no se usan para entrenamiento.
+  - Si la máscara solo contiene 0 y 1, el tile se asigna a `full`/`small`.
+
+- **Reproducibilidad:**
+  - El script acepta el argumento `--seed` para fijar la semilla de random, numpy y torch, garantizando splits y resultados reproducibles.
+
+- **Formato de guardado eficiente:**
+  - Los tiles de imagen y máscara se guardan como archivos `.npz` comprimidos (usando `np.savez_compressed`), lo que reduce el uso de disco 2-3 veces respecto a formatos tradicionales.
+  - Los metadatos de cada tile (incluyendo paths, fechas, bandas, etc.) se guardan en archivos `meta.json` por split.
+
+- **Ejemplo de uso:**
+
+```bash
+python src/preprocess.py \
+  --raw_data_root data/international-charter-eo4ai-etq-challenge/Training \
+  --output_root data/preprocessed \
+  --binary \
+  --seed 42 \
+  --workers 4
+```
+
+- **Advertencia:**
+  - El preprocesamiento puede requerir bastante espacio en disco y memoria RAM, especialmente si se procesan todas las ciudades y se usan tiles grandes o poco solapamiento.
+  - Se recomienda ejecutar primero en modo prueba (`--prueba`) para validar la configuración.
+
+Para más detalles, consulta el código fuente de `src/preprocess.py` y los ejemplos de salida en la carpeta `data/preprocessed/`.
+
 ## Estructura del dataset y preprocesamiento
 
 El siguiente diagrama muestra cómo están organizados los datos antes y después de ejecutar el preprocesamiento:

@@ -40,6 +40,12 @@ import warnings
 warnings.filterwarnings('ignore', 'GeoSeries.notna', UserWarning)
 import itertools
 import shutil
+# Añadir rich para mejorar la salida de consola
+from rich.console import Console
+from rich.text import Text
+from rich.progress import track
+
+console = Console()
 
 # Constants
 RAW_DATA_ROOT = Path("data/international-charter-eo4ai-etq-challenge/Training")
@@ -47,7 +53,8 @@ OUTPUT_ROOT = Path("data/preprocessed")
 TILE_SIZE = 512
 TILE_OVERLAP = 64
 VALID_BANDS = ['blue', 'green', 'red', 'nir', 'pan']
-MIN_VALID_PIXELS = 0.001  # Minimum % of valid pixels to keep tile (bajado para depuración)
+MIN_VALID_PIXELS = 0.01  # Porcentaje de exigencia para descartar tiles, cuanto mas alto mayor descarte
+DEFAULT_SEED = 42
 
 # 1. Definir estructura de estadísticas por banda y pre/post
 BAND_NAMES = ['blue', 'green', 'red', 'nir']
@@ -107,19 +114,20 @@ def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
     city_dirs = [d for d in raw_data_root.iterdir() if d.is_dir() and d.name.startswith("Call_")]
     
     if not city_dirs:
+        console.print(f"[bold red][ERROR][/bold red] No valid city directories found in {raw_data_root}")
         raise FileNotFoundError(f"No valid city directories found in {raw_data_root}")
     
-    for city_dir in tqdm(city_dirs, desc="Processing cities"):
+    for city_dir in track(city_dirs, description="[cyan]Processing cities"):  # reemplaza tqdm
         collection_path = city_dir / "collection.json"
         if not collection_path.exists():
-            tqdm.write(f"[WARN] Skipping {city_dir.name}: collection.json missing")
+            console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: collection.json missing")
             continue
             
         try:
             with open(collection_path) as f:
                 collection = json.load(f)
         except json.JSONDecodeError:
-            tqdm.write(f"[ERROR] Invalid JSON in {collection_path}")
+            console.print(f"[red][ERROR][/red] Invalid JSON in {collection_path}")
             continue
             
         # Extract event date
@@ -129,18 +137,18 @@ def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
         if date_match:
             event_date = f"{date_match.group(1)}T00:00:00Z"
         else:
-            tqdm.write(f"[WARN] {city_dir.name}: Event date not found")
+            console.print(f"[yellow][WARN][/yellow] {city_dir.name}: Event date not found")
             continue
             
         # Find annotation files
         ann_city_dir = annotations_root / city_dir.name
         if not ann_city_dir.exists():
-            tqdm.write(f"[WARN] Skipping {city_dir.name}: Annotation directory missing")
+            console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: Annotation directory missing")
             continue
             
         gpkg_files = list(ann_city_dir.glob("*.gpkg"))
         if not gpkg_files:
-            tqdm.write(f"[WARN] Skipping {city_dir.name}: No annotation files")
+            console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: No annotation files")
             continue
             
         # Process scenes
@@ -151,14 +159,14 @@ def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
                 
             scene_path = city_dir / link["href"]
             if not scene_path.exists():
-                tqdm.write(f"[WARN] Scene not found: {scene_path}")
+                console.print(f"[yellow][WARN][/yellow] Scene not found: {scene_path}")
                 continue
                 
             try:
                 with open(scene_path) as sf:
                     scene = json.load(sf)
             except json.JSONDecodeError:
-                tqdm.write(f"[ERROR] Invalid scene JSON: {scene_path}")
+                console.print(f"[red][ERROR][/red] Invalid scene JSON: {scene_path}")
                 continue
                 
             # Extract scene date
@@ -170,7 +178,7 @@ def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
                     scene_date = f"{d[:4]}-{d[4:6]}-{d[6:8]}T00:00:00Z"
             
             if not scene_date:
-                tqdm.write(f"[WARN] Skipping scene: Date not found in {scene_path.name}")
+                console.print(f"[yellow][WARN][/yellow] Skipping scene: Date not found in {scene_path.name}")
                 continue
                 
             if scene_date < event_date:
@@ -179,7 +187,7 @@ def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
                 post_items.append(scene)
         
         if not pre_items or not post_items:
-            tqdm.write(f"[WARN] Skipping {city_dir.name}: Missing pre/post scenes")
+            console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: Missing pre/post scenes")
             continue
             
         # Process annotations
@@ -196,7 +204,7 @@ def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
             
             # Validate we have required bands
             if not _validate_bands(img_paths["pre"]) or not _validate_bands(img_paths["post"]):
-                tqdm.write(f"[WARN] Skipping {city_dir.name}: Missing required bands")
+                console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: Missing required bands")
                 continue
                 
             yield {
@@ -229,7 +237,7 @@ def _extract_asset_paths(scene: Dict, base_dir: Path) -> Dict[str, Path]:
             if found:
                 paths[band] = found[0].resolve()
             else:
-                tqdm.write(f"[WARN] Asset not found: {rel_path}")
+                console.print(f"[yellow][WARN][/yellow] Asset not found: {rel_path}")
     return paths
 
 def _validate_bands(band_dict: Dict[str, Path]) -> bool:
@@ -296,7 +304,7 @@ def coregister(
         )
         return registered
     except Exception as e:
-        tqdm.write(f"[WARN] Coregistration failed: {str(e)}")
+        console.print(f"[yellow][WARN][/yellow] Coregistration failed: {str(e)}")
         return moving_img
 
 def rasterize_labels(
@@ -328,26 +336,31 @@ def rasterize_labels(
         if gdf.empty:
             return np.zeros(shape, dtype=np.uint8)
         
-        # Handle damage classification
+        # Handle damage classification (ajustado para binarizar y marcar desconocidos)
         if "damaged" in gdf.columns:
             values = []
             for val in gdf["damaged"]:
-                if pd.isna(val):
+                if pd.isna(val) or val is None:
                     values.append(255)  # Unknown
+                elif int(val) == 1:
+                    values.append(1)
+                elif int(val) == 0:
+                    values.append(0)
                 else:
-                    values.append(int(val))
+                    values.append(255)  # Cualquier otro valor inesperado
         else:
             values = [1] * len(gdf)
         
-        return rasterio.features.rasterize(
+        mask = rasterio.features.rasterize(
             zip(gdf.geometry, values),
             out_shape=shape,
             transform=transform,
             fill=0,
             dtype=np.uint8
         )
+        return mask
     except Exception as e:
-        tqdm.write(f"[ERROR] Rasterization failed for {gpkg_path}: {str(e)}")
+        console.print(f"[red][ERROR][/red] Rasterization failed for {gpkg_path}: {str(e)}")
         return np.zeros(shape, dtype=np.uint8)
 
 def process_scene(scene: Dict, output_root: Path, tile_size: int, tile_overlap: int,
@@ -438,18 +451,17 @@ def _process_tile(
     if np.all(tile_mask == 0) or valid_pct < MIN_VALID_PIXELS:
         return None
     tile_img = np.concatenate([pre_ms, post_ms], axis=0)
-    tile_tensor = torch.from_numpy(tile_img).float()
-    mask_tensor = torch.from_numpy(tile_mask).byte()
     tile_id = f"{scene['id']}_{y}_{x}"
     unique_mask = np.unique(tile_mask)
     if any((v not in (0, 1)) for v in unique_mask):
         split = 'test'
     else:
         split = 'full'
-    img_path = output_root / split / "images" / f"{tile_id}.pt"
-    mask_path = output_root / split / "masks" / f"{tile_id}.pt"
-    torch.save(tile_tensor.half(), img_path)
-    torch.save(mask_tensor, mask_path)
+    # Guardar como .npz comprimido en vez de torch.save
+    img_path = output_root / split / "images" / f"{tile_id}.npz"
+    mask_path = output_root / split / "masks" / f"{tile_id}.npz"
+    np.savez_compressed(img_path, tile_img.astype(np.float16))
+    np.savez_compressed(mask_path, tile_mask.astype(np.uint8))
     # Construir images_info
     images_info = {
         'pre': [
@@ -469,8 +481,6 @@ def _process_tile(
     }
     # Determinar si el tile es parcial (fuera de la imagen o contiene datos nulos)
     is_partial = False
-    # Si la ventana se sale de los límites de la imagen, boundless=True puede rellenar con ceros o nodata
-    # Consideramos parcial si hay algún NaN o si el tile no está completamente dentro de la imagen
     if (
         np.isnan(pre_ms).any() or np.isnan(post_ms).any() or
         pre_ms.shape[1:] != (TILE_SIZE, TILE_SIZE) or post_ms.shape[1:] != (TILE_SIZE, TILE_SIZE)
@@ -495,10 +505,6 @@ def _process_tile(
     }
 
 
-
-def is_in_small_split(city: str, pct: float = 0.1) -> bool:
-    """Deterministic split based on city hash"""
-    return int(hashlib.md5(city.encode()).hexdigest(), 16) % int(1/pct) == 0
 
 def save_debug_vis(tile_img: np.ndarray, tile_mask: np.ndarray, out_path: Path):
     """Save debug visualization"""
@@ -529,25 +535,33 @@ def main():
     parser.add_argument("--raw_data_root", type=str, default=str(RAW_DATA_ROOT), help="Raw data root directory")
     parser.add_argument("--output_root", type=str, default=str(OUTPUT_ROOT), help="Output root directory")
     parser.add_argument("--small_pct", type=float, default=0.1, help="Fraction of tiles per city for small split")
-    parser.add_argument("--binary", action="store_true", help="Collapse mask to binary (0/1)")
+    parser.add_argument("--binary", action="store_true", help="Collapse mask to binary (0/1)",default=True)
     parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers")
     parser.add_argument("--debug_vis", type=int, default=0, help="Save N debug overlay PNGs")
     parser.add_argument("--verbose", action="store_true", help="Mostrar información detallada de depuración",default=False)
     parser.add_argument("--prueba", action="store_true", help="Procesar solo una ciudad para pruebas rápidas",default=True)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Seed para reproducibilidad")
     args = parser.parse_args()
     
     global VERBOSE
     VERBOSE = args.verbose
 
+    # Fijar seed para reproducibilidad
+    import random as pyrandom
+    pyrandom.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
     # Borrar carpeta de salida si existe
     output_root = Path(args.output_root)
     if output_root.exists():
-        print(f"[INFO] Borrando carpeta de salida: {output_root}")
+        console.print(f"[bold yellow][INFO][/bold yellow] Borrando carpeta de salida: {output_root}")
         shutil.rmtree(output_root)
 
     # Validate paths
     raw_root = Path(args.raw_data_root)
     if not raw_root.exists():
+        console.print(f"[bold red][ERROR][/bold red] Raw data directory not found: {raw_root}")
         raise FileNotFoundError(f"Raw data directory not found: {raw_root}")
         
     output_root.mkdir(parents=True, exist_ok=True)
@@ -560,13 +574,14 @@ def main():
     # Process scenes
     scenes = list(read_stac(raw_root))
     if not scenes:
+        console.print(f"[bold red][ERROR][/bold red] No valid scenes found for processing")
         raise RuntimeError("No valid scenes found for processing")
 
     if args.prueba:
-        tqdm.write("[INFO] Modo prueba activado: solo se procesarán 2 escenas.")
-        scenes = scenes[:1]
+        console.print("[bold cyan][INFO][/bold cyan] Modo prueba activado: solo se procesarán 3 escenas.")
+        scenes = scenes[:3]
 
-    tqdm.write(f"Found {len(scenes)} scenes to process")
+    console.print(f"[bold green]Found {len(scenes)} scenes to process[/bold green]")
     
     # Process with multiprocessing
     params = {
@@ -638,8 +653,7 @@ def main():
                 debug_samples.extend(debug)
     
     # Hacer el split 'small' como 10% aleatorio de 'full' por ciudad
-    import random
-    random.seed(42)
+    pyrandom.seed(args.seed)
     full_tiles_by_city = {}
     for tile in all_meta['full']:
         city = tile['city']
@@ -649,7 +663,7 @@ def main():
     for city, tiles in full_tiles_by_city.items():
         n_small = max(1, int(0.1 * len(tiles)))
         idxs = list(range(len(tiles)))
-        random.shuffle(idxs)
+        pyrandom.shuffle(idxs)
         small_idx = set(idxs[:n_small])
         for i, tile in enumerate(tiles):
             if i in small_idx:
