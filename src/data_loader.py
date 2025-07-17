@@ -17,11 +17,10 @@ import rasterio
 from rasterio.windows import Window
 import cv2
 from loguru import logger
+import json
 
 from .config import Config
 from .transforms import get_transforms
-
-// modificar este archivo para que si se ejecuta (if __name__=='__main__'), entonces, se creen dataset, dataloader y se guarden en memoria.
 
 class EarthquakeDataset(Dataset):
     """
@@ -263,6 +262,44 @@ class EarthquakeDataset(Dataset):
             return mask
 
 
+class PreprocessedTileDataset(Dataset):
+    """
+    Dataset para datos preprocesados por preprocess.py (tiles en .pt y meta.json).
+    """
+    def __init__(self, data_root: str, split: str = 'full', transform=None):
+        self.data_root = Path(data_root)
+        self.split = split
+        self.transform = transform
+        meta_path = self.data_root / split / 'meta.json'
+        with open(meta_path, 'r') as f:
+            self.meta = json.load(f)
+        self.images_dir = self.data_root / split / 'images'
+        self.masks_dir = self.data_root / split / 'masks'
+
+    def __len__(self):
+        return len(self.meta)
+
+    def __getitem__(self, idx):
+        item = self.meta[idx]
+        tile_id = item['id']
+        img_path = self.images_dir / f"{tile_id}.pt"
+        mask_path = self.masks_dir / f"{tile_id}.pt"
+        image = torch.load(img_path, map_location='cpu')
+        mask = torch.load(mask_path, map_location='cpu')
+        if self.transform:
+            out = self.transform(image=image, mask=mask)
+            image = out['image']
+            mask = out['mask']
+        return {
+            'image': image,
+            'mask': mask,
+            'tile_id': tile_id,
+            'city': item.get('city', ''),
+            'scene_id': item.get('scene_id', ''),
+            'bbox': item.get('bbox', None)
+        }
+
+
 def get_data_loaders(
     config: Config,
     data_root: Optional[str] = None
@@ -383,3 +420,53 @@ def get_dataset_info(data_root: str) -> Dict[str, any]:
     }
     
     return info 
+
+if __name__ == '__main__':
+    import time
+    import argparse
+    import tempfile
+    parser = argparse.ArgumentParser(description="Test DataLoader standalone.")
+    parser.add_argument('--data_root', type=str, default='data/preprocessed', help='Directorio raíz de los datos preprocesados')
+    parser.add_argument('--split', type=str, default='full', help='Split a usar (full/small/val)')
+    parser.add_argument('--batch_size', type=int, default=8, help='Tamaño de batch para el DataLoader')
+    parser.add_argument('--num_workers', type=int, default=2, help='Número de workers para el DataLoader')
+    args = parser.parse_args()
+
+    start = time.time()
+    # Dataset y DataLoader para datos preprocesados
+    dataset = PreprocessedTileDataset(
+        data_root=args.data_root,
+        split=args.split,
+        transform=None
+    )
+    print(f"[INFO] PreprocessedTileDataset cargado: {len(dataset)} tiles.")
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    print(f"[INFO] DataLoader creado con batch_size={args.batch_size}.")
+
+    # Guardar en memoria optimizada (solo los tensores)
+    all_images = []
+    all_masks = []
+    for batch in dataloader:
+        all_images.append(batch['image'])
+        all_masks.append(batch['mask'])
+    images_tensor = torch.cat(all_images, dim=0)
+    masks_tensor = torch.cat(all_masks, dim=0)
+    print(f"[INFO] Tensores concatenados: imágenes {images_tensor.shape}, máscaras {masks_tensor.shape}")
+
+    # Guardar en archivos temporales
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_img, tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as f_mask:
+        torch.save(images_tensor, f_img.name)
+        torch.save(masks_tensor, f_mask.name)
+        print(f"[INFO] Imágenes guardadas en: {f_img.name}")
+        print(f"[INFO] Máscaras guardadas en: {f_mask.name}")
+
+    elapsed = time.time() - start
+    print(f"[INFO] Tiempo total: {elapsed:.2f} segundos.") 
+    

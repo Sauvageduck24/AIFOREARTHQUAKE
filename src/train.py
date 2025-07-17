@@ -20,9 +20,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from loguru import logger
 import wandb
+from rich.console import Console
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich import box
+
+console = Console()
 
 from .config import Config, get_default_config
-from .data_loader import get_data_loaders
+from .data_loader import get_data_loaders, PreprocessedTileDataset
 from .model import get_model
 from .utils import (
     set_seed, setup_logging, calculate_metrics, calculate_loss,
@@ -30,6 +36,29 @@ from .utils import (
     visualize_predictions, plot_metrics_history
 )
 
+
+def get_preprocessed_dataloaders(config):
+    """
+    Crea DataLoaders usando PreprocessedTileDataset para los splits disponibles.
+    """
+    from torch.utils.data import DataLoader
+    data_root = config.data.processed_data_path if hasattr(config.data, 'processed_data_path') else 'data/preprocessed'
+    batch_size = config.data.batch_size
+    num_workers = config.data.num_workers
+    pin_memory = config.data.pin_memory
+    splits = ['full', 'val', 'test']
+    loaders = {}
+    for split in splits:
+        try:
+            dataset = PreprocessedTileDataset(data_root=data_root, split=split, transform=None)
+            loader = DataLoader(dataset, batch_size=batch_size, shuffle=(split=='full'), num_workers=num_workers, pin_memory=pin_memory)
+            loaders[split] = loader
+        except Exception as e:
+            loaders[split] = None
+    train_loader = loaders.get('full', None)
+    val_loader = loaders.get('val', None)
+    test_loader = loaders.get('test', None)
+    return train_loader, val_loader, test_loader
 
 class Trainer:
     """
@@ -96,16 +125,12 @@ class Trainer:
         logger.info("Trainer inicializado")
     
     def setup_data(self):
-        """Configurar dataloaders."""
-        logger.info("Configurando dataloaders...")
-        
-        self.train_loader, self.val_loader, self.test_loader = get_data_loaders(
-            config=self.config
-        )
-        
-        logger.info(f"Train batches: {len(self.train_loader)}")
-        logger.info(f"Val batches: {len(self.val_loader)}")
-        logger.info(f"Test batches: {len(self.test_loader)}")
+        """Configurar dataloaders usando datos preprocesados."""
+        logger.info("Configurando dataloaders (preprocessed)...")
+        self.train_loader, self.val_loader, self.test_loader = get_preprocessed_dataloaders(self.config)
+        logger.info(f"Train batches: {len(self.train_loader) if self.train_loader else 0}")
+        logger.info(f"Val batches: {len(self.val_loader) if self.val_loader else 0}")
+        logger.info(f"Test batches: {len(self.test_loader) if self.test_loader else 0}")
     
     def setup_model(self):
         """Configurar modelo, optimizador y scheduler."""
@@ -200,82 +225,74 @@ class Trainer:
         all_predictions = []
         all_targets = []
         
-        # Barra de progreso
-        from tqdm import tqdm
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.training.epochs}")
-        
-        for batch_idx, batch in enumerate(pbar):
-            # Mover datos al dispositivo
-            images = batch['image'].to(self.device)
-            targets = batch['mask'].to(self.device)
-            
-            # Forward pass con mixed precision
-            if self.config.hardware.use_amp:
-                with autocast():
+        # Barra de progreso profesional
+        with Progress(
+            SpinnerColumn(),
+            "[progress.description]{task.description}",
+            BarColumn(),
+            "[progress.percentage]{task.percentage:>3.0f}%",
+            TimeElapsedColumn(),
+            console=console,
+            transient=True
+        ) as progress:
+            task = progress.add_task(f"[cyan]Entrenando (Epoch {epoch+1})", total=len(self.train_loader))
+            for batch_idx, batch in enumerate(self.train_loader):
+                # Mover datos al dispositivo
+                images = batch['image'].to(self.device)
+                targets = batch['mask'].to(self.device)
+                
+                # Forward pass con mixed precision
+                if self.config.hardware.use_amp:
+                    with autocast():
+                        predictions = self.model(images)
+                        loss = calculate_loss(
+                            predictions, targets,
+                            self.config.training.loss_function,
+                            self.config.training.class_weights
+                        )
+                    
+                    # Backward pass
+                    self.scaler.scale(loss).backward()
+                    
+                    # Gradient accumulation
+                    if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.config.hardware.max_grad_norm
+                        )
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.optimizer.zero_grad()
+                else:
+                    # Forward pass normal
                     predictions = self.model(images)
                     loss = calculate_loss(
                         predictions, targets,
                         self.config.training.loss_function,
                         self.config.training.class_weights
                     )
+                    
+                    # Backward pass
+                    loss.backward()
+                    
+                    # Gradient accumulation
+                    if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.config.hardware.max_grad_norm
+                        )
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
                 
-                # Backward pass
-                self.scaler.scale(loss).backward()
+                # Acumular métricas
+                total_loss += loss.item()
+                all_predictions.append(predictions.detach())
+                all_targets.append(targets.detach())
                 
-                # Gradient accumulation
-                if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        self.config.hardware.max_grad_norm
-                    )
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.optimizer.zero_grad()
-            else:
-                # Forward pass normal
-                predictions = self.model(images)
-                loss = calculate_loss(
-                    predictions, targets,
-                    self.config.training.loss_function,
-                    self.config.training.class_weights
-                )
-                
-                # Backward pass
-                loss.backward()
-                
-                # Gradient accumulation
-                if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        self.config.hardware.max_grad_norm
-                    )
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
+                # Actualizar barra de progreso
+                progress.update(task, advance=1, description=f"[cyan]Entrenando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
             
-            # Acumular métricas
-            total_loss += loss.item()
-            all_predictions.append(predictions.detach())
-            all_targets.append(targets.detach())
-            
-            # Actualizar barra de progreso
-            pbar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                'avg_loss': f"{total_loss/(batch_idx+1):.4f}"
-            })
-            
-            # Loggear cada N pasos
-            if batch_idx % self.config.logging.log_frequency == 0:
-                step = epoch * len(self.train_loader) + batch_idx
-                log_metrics(
-                    {'loss': loss.item()},
-                    step,
-                    prefix="train_",
-                    use_wandb=self.config.logging.wandb,
-                    use_tensorboard=self.config.logging.tensorboard,
-                    tensorboard_writer=self.tensorboard_writer
-                )
-        
         # Calcular métricas finales
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
@@ -303,36 +320,47 @@ class Trainer:
         all_images = []
         
         with torch.no_grad():
-            for batch_idx, batch in enumerate(self.val_loader):
-                # Mover datos al dispositivo
-                images = batch['image'].to(self.device)
-                targets = batch['mask'].to(self.device)
-                
-                # Forward pass
-                if self.config.hardware.use_amp:
-                    with autocast():
+            with Progress(
+                SpinnerColumn(),
+                "[progress.description]{task.description}",
+                BarColumn(),
+                "[progress.percentage]{task.percentage:>3.0f}%",
+                TimeElapsedColumn(),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=len(self.val_loader))
+                for batch_idx, batch in enumerate(self.val_loader):
+                    # Mover datos al dispositivo
+                    images = batch['image'].to(self.device)
+                    targets = batch['mask'].to(self.device)
+                    
+                    # Forward pass
+                    if self.config.hardware.use_amp:
+                        with autocast():
+                            predictions = self.model(images)
+                            loss = calculate_loss(
+                                predictions, targets,
+                                self.config.training.loss_function,
+                                self.config.training.class_weights
+                            )
+                    else:
                         predictions = self.model(images)
                         loss = calculate_loss(
                             predictions, targets,
                             self.config.training.loss_function,
                             self.config.training.class_weights
                         )
-                else:
-                    predictions = self.model(images)
-                    loss = calculate_loss(
-                        predictions, targets,
-                        self.config.training.loss_function,
-                        self.config.training.class_weights
-                    )
-                
-                # Acumular métricas
-                total_loss += loss.item()
-                all_predictions.append(predictions)
-                all_targets.append(targets)
-                
-                # Guardar algunas imágenes para visualización
-                if batch_idx == 0:
-                    all_images.append(images[:4])
+                    
+                    # Acumular métricas
+                    total_loss += loss.item()
+                    all_predictions.append(predictions)
+                    all_targets.append(targets)
+                    
+                    # Guardar algunas imágenes para visualización
+                    if batch_idx == 0:
+                        all_images.append(images[:4])
+                    progress.update(task, advance=1, description=f"[magenta]Validando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
         
         # Calcular métricas finales
         all_predictions = torch.cat(all_predictions, dim=0)
@@ -399,6 +427,17 @@ class Trainer:
             is_best
         )
     
+    def print_metrics_table(self, train_metrics, val_metrics, epoch):
+        table = Table(title=f"Resumen de métricas - Epoch {epoch+1}", box=box.SIMPLE_HEAVY)
+        table.add_column("Split", style="bold")
+        table.add_column("Loss", justify="right")
+        table.add_column("F1", justify="right")
+        table.add_column("IoU", justify="right")
+        table.add_column("Accuracy", justify="right")
+        table.add_row("[cyan]Train", f"{train_metrics['loss']:.4f}", f"{train_metrics['f1_score']:.4f}", f"{train_metrics['iou']:.4f}", f"{train_metrics['accuracy']:.4f}")
+        table.add_row("[magenta]Val", f"{val_metrics['loss']:.4f}", f"{val_metrics['f1_score']:.4f}", f"{val_metrics['iou']:.4f}", f"{val_metrics['accuracy']:.4f}")
+        console.print(table)
+
     def train(self, resume_from: Optional[str] = None):
         """
         Ejecutar entrenamiento completo.
@@ -426,19 +465,14 @@ class Trainer:
         self.config.save(self.config.logging.output_dir)
         
         # Ciclo de entrenamiento
+        best_f1 = 0.0
+        best_epoch = 0
         for epoch in range(start_epoch, self.config.training.epochs):
-            logger.info(f"\n{'='*50}")
-            logger.info(f"Época {epoch+1}/{self.config.training.epochs}")
-            logger.info(f"{'='*50}")
-            
-            # Entrenar
+            console.rule(f"[bold green]Época {epoch+1}/{self.config.training.epochs}")
             train_metrics = self.train_epoch(epoch)
-            
-            # Validar
             if epoch % self.config.training.val_frequency == 0:
                 val_metrics = self.validate_epoch(epoch)
-                
-                # Loggear métricas
+                self.print_metrics_table(train_metrics, val_metrics, epoch)
                 step = epoch * len(self.train_loader)
                 log_metrics(
                     {**train_metrics, **val_metrics},
@@ -447,33 +481,24 @@ class Trainer:
                     use_tensorboard=self.config.logging.tensorboard,
                     tensorboard_writer=self.tensorboard_writer
                 )
-                
-                # Actualizar historial
                 for key in train_metrics:
                     if f'train_{key}' in self.metrics_history:
                         self.metrics_history[f'train_{key}'].append(train_metrics[key])
                 for key in val_metrics:
                     if f'val_{key}' in self.metrics_history:
                         self.metrics_history[f'val_{key}'].append(val_metrics[key])
-                
-                # Loggear métricas
-                logger.info(f"Train - Loss: {train_metrics['loss']:.4f}, F1: {train_metrics['f1_score']:.4f}, IoU: {train_metrics['iou']:.4f}")
-                logger.info(f"Val   - Loss: {val_metrics['loss']:.4f}, F1: {val_metrics['f1_score']:.4f}, IoU: {val_metrics['iou']:.4f}")
-                
-                # Actualizar scheduler
+                if val_metrics['f1_score'] > best_f1:
+                    best_f1 = val_metrics['f1_score']
+                    best_epoch = epoch+1
+                    console.print(f"[bold yellow]Nuevo mejor modelo (F1={best_f1:.4f}) guardado en epoch {best_epoch}")
                 self.update_scheduler(val_metrics['f1_score'])
-                
-                # Verificar early stopping
                 if self.check_early_stopping(val_metrics['f1_score']):
-                    logger.info("Early stopping activado")
+                    console.print(f"[bold red]Early stopping activado en epoch {epoch+1}")
                     break
-                
-                # Guardar checkpoint
                 is_best = val_metrics['f1_score'] > self.best_metric
                 if epoch % self.config.training.save_frequency == 0 or is_best:
                     self.save_checkpoint(epoch, train_metrics, val_metrics, is_best)
             else:
-                # Solo loggear métricas de entrenamiento
                 step = epoch * len(self.train_loader)
                 log_metrics(
                     train_metrics,
@@ -483,8 +508,7 @@ class Trainer:
                     use_tensorboard=self.config.logging.tensorboard,
                     tensorboard_writer=self.tensorboard_writer
                 )
-                
-                logger.info(f"Train - Loss: {train_metrics['loss']:.4f}, F1: {train_metrics['f1_score']:.4f}, IoU: {train_metrics['iou']:.4f}")
+                console.print(f"[cyan]Train - Loss: {train_metrics['loss']:.4f}, F1: {train_metrics['f1_score']:.4f}, IoU: {train_metrics['iou']:.4f}")
         
         # Guardar modelo final
         if self.config.training.save_last:
@@ -498,7 +522,8 @@ class Trainer:
         plot_path = f"{self.config.logging.output_dir}/metrics_history.png"
         plot_metrics_history(self.metrics_history, save_path=plot_path)
         
-        logger.info("Entrenamiento completado")
+        console.rule("[bold green]Entrenamiento completado")
+        console.print(f"[bold green]Mejor F1: {best_f1:.4f} en epoch {best_epoch}")
         
         # Cerrar TensorBoard
         if self.tensorboard_writer:
