@@ -4,10 +4,6 @@ Este proyecto implementa modelos de deep learning para la detección automática
 
 ---
 
-![Estructura del proyecto](estructura.jpg)
-
----
-
 ## 🏆 Competición
 
 Este proyecto participa en la competición **[AI for Earthquake Response](https://platform.ai4eo.eu/ai-for-earthquake-response)** organizada por ESA Φ-lab y el International Charter 'Space and Major Disasters'.
