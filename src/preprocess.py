@@ -669,6 +669,16 @@ def main():
             if i in small_idx:
                 tile_copy = tile.copy()
                 tile_copy['split'] = 'small'
+                # Copiar archivos físicos a small/images y small/masks
+                src_img = Path(tile['img_path'])
+                src_mask = Path(tile['mask_path'])
+                dst_img = output_root / 'small' / 'images' / src_img.name
+                dst_mask = output_root / 'small' / 'masks' / src_mask.name
+                shutil.copy2(src_img, dst_img)
+                shutil.copy2(src_mask, dst_mask)
+                # Actualizar paths en el meta.json de small
+                tile_copy['img_path'] = str(dst_img)
+                tile_copy['mask_path'] = str(dst_mask)
                 small_tiles.append(tile_copy)
             else:
                 new_full_tiles.append(tile)

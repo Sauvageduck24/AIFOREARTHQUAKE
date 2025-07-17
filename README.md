@@ -120,6 +120,39 @@ python src/preprocess.py \
 
 Para más detalles, consulta el código fuente de `src/preprocess.py` y los ejemplos de salida en la carpeta `data/preprocessed/`.
 
+## 📦 Generación de Datasets y DataLoaders para Entrenamiento
+
+Una vez preprocesados los datos, puedes generar los objetos `Dataset` y `DataLoader` de PyTorch listos para entrenar modelos que predicen el daño (`damaged`).
+
+Esto se realiza con el script [`src/data_loader.py`](src/data_loader.py):
+
+- Permite elegir entre el split completo (`full`) o reducido (`small`) usando el argumento `--small`.
+- Carga los tiles y máscaras desde los archivos `.npz` y los metadatos de `meta.json`.
+- Guarda los objetos `Dataset` y `DataLoader` en disco para su uso directo en los experimentos.
+
+### Ejemplo de uso
+
+```bash
+# Para el split reducido (small, recomendado para pruebas rápidas)
+python src/data_loader.py --small
+
+# Para el split completo (full, para entrenamiento final)
+python src/data_loader.py
+```
+
+Esto generará los archivos:
+- `data/datasets/dataset_small.pt` y/o `data/datasets/dataset_full.pt`
+- `data/dataloaders/dataloader_small.pt` y/o `data/dataloaders/dataloader_full.pt`
+
+Estos archivos pueden ser cargados directamente en tus scripts de entrenamiento para entrenar modelos de segmentación que predicen la máscara de daño (`damaged`).
+
+### Consejos
+- Usa el split `small` para depuración y pruebas rápidas.
+- Usa el split `full` para el entrenamiento final del modelo.
+- Los dataloaders están listos para PyTorch y cargan los tiles y máscaras en memoria de forma eficiente.
+
+Para más detalles, consulta el código fuente de [`src/data_loader.py`](src/data_loader.py).
+
 ## Estructura del dataset y preprocesamiento
 
 El siguiente diagrama muestra cómo están organizados los datos antes y después de ejecutar el preprocesamiento:
