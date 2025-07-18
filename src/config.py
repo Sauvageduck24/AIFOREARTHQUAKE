@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import yaml
 from omegaconf import OmegaConf
+import dataclasses
 
 
 @dataclass
@@ -65,6 +66,11 @@ class ModelConfig:
     # Dropout y regularización
     dropout: float = 0.1
     attention: bool = False
+    
+    # Número de características de entrada para modelos lineales
+    in_features: int = 1572864      # Número de características de entrada para modelos lineales
+    # Número de salidas para modelos lineales o custom
+    out_features: int = 1     # Número de salidas para modelos lineales o custom
 
 
 @dataclass
@@ -197,7 +203,7 @@ class Config:
     
     def to_yaml(self, yaml_path: str):
         """Guardar configuración en archivo YAML."""
-        config_dict = OmegaConf.to_container(self, resolve=True)
+        config_dict = dataclasses.asdict(self)
         with open(yaml_path, 'w') as f:
             yaml.dump(config_dict, f, default_flow_style=False, indent=2)
     

@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import timm
 from loguru import logger
 
-from .config import ModelConfig
+from config import ModelConfig
 
 
 class DoubleConv(nn.Module):
@@ -421,15 +421,15 @@ class TransformerBlock(nn.Module):
 def get_model(config: ModelConfig) -> nn.Module:
     """
     Crear modelo según la configuración.
-    
     Args:
         config: Configuración del modelo
-        
     Returns:
         Modelo de PyTorch
     """
-    
-    if config.model_name == "unet":
+    if config.model_name == "linear":
+        # Modelo lineal por píxel (convolución 1x1 para segmentación)
+        model = nn.Conv2d(config.in_channels, config.out_channels, kernel_size=1)
+    elif config.model_name == "unet":
         model = UNet(
             in_channels=config.in_channels,
             out_channels=config.out_channels,
@@ -438,7 +438,6 @@ def get_model(config: ModelConfig) -> nn.Module:
             dropout=config.dropout,
             attention=config.attention
         )
-    
     elif config.model_name == "resnet_unet":
         model = ResNetUNet(
             backbone=config.backbone,
@@ -447,7 +446,6 @@ def get_model(config: ModelConfig) -> nn.Module:
             pretrained=config.pretrained,
             dropout=config.dropout
         )
-    
     elif config.model_name == "efficientnet_unet":
         model = EfficientNetUNet(
             backbone=config.backbone,
@@ -456,21 +454,17 @@ def get_model(config: ModelConfig) -> nn.Module:
             pretrained=config.pretrained,
             dropout=config.dropout
         )
-    
     elif config.model_name == "transformer":
         model = SegmentationTransformer(
             in_channels=config.in_channels,
             out_channels=config.out_channels,
             dropout=config.dropout
         )
-    
     else:
         raise ValueError(f"Modelo {config.model_name} no soportado")
-    
     logger.info(f"Modelo creado: {config.model_name}")
     logger.info(f"Parámetros totales: {sum(p.numel() for p in model.parameters()):,}")
     logger.info(f"Parámetros entrenables: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    
     return model
 
 

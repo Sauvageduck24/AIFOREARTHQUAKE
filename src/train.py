@@ -3,6 +3,17 @@ Módulo de entrenamiento para el proyecto AI for Earthquake Response.
 
 Este módulo implementa el ciclo completo de entrenamiento y validación
 para modelos de detección de daños por terremotos.
+
+Ahora soporta cualquier modelo de PyTorch, incluyendo modelos simples como nn.Linear:
+
+Ejemplo de uso con modelo lineal:
+  - En config.yaml:
+      model:
+        model_name: "linear"
+        in_features: 8  # canales*H*W si imagen completa
+        out_features: 1 # binario
+  - O por línea de comandos:
+      python src/train.py --model linear
 """
 
 import os
@@ -27,10 +38,10 @@ from rich import box
 
 console = Console()
 
-from .config import Config, get_default_config
-from .data_loader import get_data_loaders, PreprocessedTileDataset
-from .model import get_model
-from .utils import (
+from config import Config, get_default_config
+# from data_loader import PreprocessedTileDataset  # Eliminado porque no existe ni se usa
+from model import get_model
+from utils import (
     set_seed, setup_logging, calculate_metrics, calculate_loss,
     save_checkpoint, load_checkpoint, log_metrics, setup_wandb,
     visualize_predictions, plot_metrics_history
@@ -125,13 +136,16 @@ class Trainer:
         logger.info("Trainer inicializado")
     
     def setup_data(self):
-        """Configurar dataloaders usando datos preprocesados."""
-        logger.info("Configurando dataloaders (preprocessed)...")
-        self.train_loader, self.val_loader, self.test_loader = get_preprocessed_dataloaders(self.config)
-        logger.info(f"Train batches: {len(self.train_loader) if self.train_loader else 0}")
-        logger.info(f"Val batches: {len(self.val_loader) if self.val_loader else 0}")
-        logger.info(f"Test batches: {len(self.test_loader) if self.test_loader else 0}")
-    
+        """Cargar DataLoader preprocesado desde disco."""
+        split = getattr(self.config.data, 'split', 'full') if hasattr(self.config, 'data') else 'full'
+        dataloader_path = f"data/dataloaders/dataloader_{split}.pt"
+        self.train_loader = torch.load(dataloader_path)
+        val_path = "data/dataloaders/dataloader_val.pt"
+        if os.path.exists(val_path):
+            self.val_loader = torch.load(val_path)
+        else:
+            self.val_loader = None
+        print(f"[INFO] DataLoader cargado desde {dataloader_path} ({len(self.train_loader)} batches)")
     def setup_model(self):
         """Configurar modelo, optimizador y scheduler."""
         logger.info("Configurando modelo...")
@@ -243,8 +257,12 @@ class Trainer:
                 
                 # Forward pass con mixed precision
                 if self.config.hardware.use_amp:
-                    with autocast():
+                    with torch.amp.autocast('cuda'):
                         predictions = self.model(images)
+                        # Asegurar shape compatible para la loss
+                        if targets.ndim == 3:
+                            targets = targets.unsqueeze(1)
+                        targets = targets.float()
                         loss = calculate_loss(
                             predictions, targets,
                             self.config.training.loss_function,
@@ -267,6 +285,10 @@ class Trainer:
                 else:
                     # Forward pass normal
                     predictions = self.model(images)
+                    # Asegurar shape compatible para la loss
+                    if targets.ndim == 3:
+                        targets = targets.unsqueeze(1)
+                    targets = targets.float()
                     loss = calculate_loss(
                         predictions, targets,
                         self.config.training.loss_function,
@@ -339,6 +361,9 @@ class Trainer:
                     if self.config.hardware.use_amp:
                         with autocast():
                             predictions = self.model(images)
+                            if targets.ndim == 3:
+                                targets = targets.unsqueeze(1)
+                            targets = targets.float()
                             loss = calculate_loss(
                                 predictions, targets,
                                 self.config.training.loss_function,
@@ -346,6 +371,9 @@ class Trainer:
                             )
                     else:
                         predictions = self.model(images)
+                        if targets.ndim == 3:
+                            targets = targets.unsqueeze(1)
+                        targets = targets.float()
                         loss = calculate_loss(
                             predictions, targets,
                             self.config.training.loss_function,
@@ -470,7 +498,7 @@ class Trainer:
         for epoch in range(start_epoch, self.config.training.epochs):
             console.rule(f"[bold green]Época {epoch+1}/{self.config.training.epochs}")
             train_metrics = self.train_epoch(epoch)
-            if epoch % self.config.training.val_frequency == 0:
+            if epoch % self.config.training.val_frequency == 0 and self.val_loader is not None:
                 val_metrics = self.validate_epoch(epoch)
                 self.print_metrics_table(train_metrics, val_metrics, epoch)
                 step = epoch * len(self.train_loader)
@@ -539,7 +567,7 @@ def main():
     parser.add_argument("--epochs", type=int, help="Número de épocas")
     parser.add_argument("--batch_size", type=int, help="Tamaño de batch")
     parser.add_argument("--lr", type=float, help="Learning rate")
-    parser.add_argument("--model", type=str, help="Nombre del modelo")
+    parser.add_argument("--model", type=str, help="Nombre del modelo",default='linear')
     parser.add_argument("--distributed", action="store_true", help="Usar entrenamiento distribuido")
     
     args = parser.parse_args()

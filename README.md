@@ -120,6 +120,30 @@ python src/preprocess.py \
 
 Para más detalles, consulta el código fuente de `src/preprocess.py` y los ejemplos de salida en la carpeta `data/preprocessed/`.
 
+## ✅ Revisión de alineación entre preprocess.py y el dataset
+
+La siguiente tabla resume cómo el script `src/preprocess.py` se alinea con los requisitos y recomendaciones del dataset oficial y este repositorio:
+
+| Requisito (README dataset)           | ¿Implementado en preprocess.py? | Notas                                  |
+|--------------------------------------|:-------------------------------:|----------------------------------------|
+| Estructura de directorios y archivos | ✔️                              | Descubrimiento y emparejamiento robusto|
+| Manejo de bandas y pan-sharpening    | ✔️                              | Método GSA, opcional                   |
+| Rasterización de anotaciones         | ✔️                              | Daño/no-daño/desconocido               |
+| Emparejamiento pre/post evento       | ✔️                              | Fecha más cercana antes/después evento |
+| Filtrado de tiles                    | ✔️                              | Basado en cobertura de máscara         |
+| Estructura de salida y metadatos     | ✔️                              | .npz, meta.json, stats.json            |
+| Manejo de errores                    | ✔️                              | rich console, warnings, skips          |
+| Recorte por "analysis extent"        | ❌/⚠️                           | No implementado, considerar agregar    |
+| Manejo de desbalance de clases       | ⚠️                              | No abordado, relevante para entrenamiento|
+| Augmentación                         | ⚠️                              | No en preprocesado, sí en entrenamiento|
+
+**Sugerencias:**
+- Si el dataset incluye polígonos de "analysis extent", considera agregar lógica para recortar/máscarar tiles a esa área.
+- Documenta cómo se maneja el desbalance de clases y las anotaciones incompletas.
+- El preprocesamiento es robusto y modular, listo para grandes volúmenes de datos.
+
+---
+
 ## 📦 Generación de Datasets y DataLoaders para Entrenamiento
 
 Una vez preprocesados los datos, puedes generar los objetos `Dataset` y `DataLoader` de PyTorch listos para entrenar modelos que predicen el daño (`damaged`).
