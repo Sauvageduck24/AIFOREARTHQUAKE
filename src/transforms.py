@@ -145,20 +145,18 @@ def get_train_transforms(image_size: int, prob: float = 0.5) -> A.Compose:
         # Redimensionar
         A.Resize(
             height=image_size,
-            width=image_size,
-            always_apply=True
+            width=image_size
         ),
         
         # Normalización
         A.Normalize(
             mean=[0.485, 0.456, 0.406, 0.485, 0.456, 0.406],  # Para 6 canales (3 pre + 3 post)
             std=[0.229, 0.224, 0.225, 0.229, 0.224, 0.225],
-            max_pixel_value=1.0,
-            always_apply=True
+            max_pixel_value=1.0
         ),
         
         # Convertir a tensor
-        ToTensorV2(always_apply=True)
+        ToTensorV2()
     ])
 
 
@@ -177,20 +175,18 @@ def get_val_test_transforms(image_size: int) -> A.Compose:
         # Solo redimensionar y normalizar
         A.Resize(
             height=image_size,
-            width=image_size,
-            always_apply=True
+            width=image_size
         ),
         
         # Normalización
         A.Normalize(
             mean=[0.485, 0.456, 0.406, 0.485, 0.456, 0.406],  # Para 6 canales
             std=[0.229, 0.224, 0.225, 0.229, 0.224, 0.225],
-            max_pixel_value=1.0,
-            always_apply=True
+            max_pixel_value=1.0
         ),
         
         # Convertir a tensor
-        ToTensorV2(always_apply=True)
+        ToTensorV2()
     ])
 
 
@@ -209,20 +205,18 @@ def get_inference_transforms(image_size: int) -> A.Compose:
         # Redimensionar manteniendo aspect ratio
         A.Resize(
             height=image_size,
-            width=image_size,
-            always_apply=True
+            width=image_size
         ),
         
         # Normalización
         A.Normalize(
             mean=[0.485, 0.456, 0.406, 0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225, 0.229, 0.224, 0.225],
-            max_pixel_value=1.0,
-            always_apply=True
+            max_pixel_value=1.0
         ),
         
         # Convertir a tensor
-        ToTensorV2(always_apply=True)
+        ToTensorV2()
     ])
 
 
@@ -245,20 +239,18 @@ def get_tta_transforms(image_size: int) -> A.Compose:
         # Redimensionar
         A.Resize(
             height=image_size,
-            width=image_size,
-            always_apply=True
+            width=image_size
         ),
         
         # Normalización
         A.Normalize(
             mean=[0.485, 0.456, 0.406, 0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225, 0.229, 0.224, 0.225],
-            max_pixel_value=1.0,
-            always_apply=True
+            max_pixel_value=1.0
         ),
         
         # Convertir a tensor
-        ToTensorV2(always_apply=True)
+        ToTensorV2()
     ])
 
 
@@ -360,20 +352,18 @@ def get_strong_augmentation_transforms(image_size: int) -> A.Compose:
         # Redimensionar
         A.Resize(
             height=image_size,
-            width=image_size,
-            always_apply=True
+            width=image_size
         ),
         
         # Normalización
         A.Normalize(
             mean=[0.485, 0.456, 0.406, 0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225, 0.229, 0.224, 0.225],
-            max_pixel_value=1.0,
-            always_apply=True
+            max_pixel_value=1.0
         ),
         
         # Convertir a tensor
-        ToTensorV2(always_apply=True)
+        ToTensorV2()
     ])
 
 

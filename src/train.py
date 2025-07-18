@@ -133,19 +133,28 @@ class Trainer:
         self.best_metric = 0.0
         self.patience_counter = 0
         
+        self.mode = getattr(config.data, 'mode', 'basic') if hasattr(config, 'data') else 'basic'
         logger.info("Trainer inicializado")
+        # Variables para guardar el mejor modelo en memoria
+        self.best_model_state = None
+        self.best_optimizer_state = None
+        self.best_epoch = 0
+        self.best_train_metrics = None
+        self.best_val_metrics = None
     
     def setup_data(self):
-        """Cargar DataLoader preprocesado desde disco."""
-        split = getattr(self.config.data, 'split', 'full') if hasattr(self.config, 'data') else 'full'
-        dataloader_path = f"data/dataloaders/dataloader_{split}.pt"
-        self.train_loader = torch.load(dataloader_path)
-        val_path = "data/dataloaders/dataloader_val.pt"
-        if os.path.exists(val_path):
-            self.val_loader = torch.load(val_path)
-        else:
-            self.val_loader = None
-        print(f"[INFO] DataLoader cargado desde {dataloader_path} ({len(self.train_loader)} batches)")
+        """Cargar DataLoader de train y val desde disco."""
+        mode = getattr(self.config.data, 'mode', 'basic') if hasattr(self.config, 'data') else 'basic'
+        train_path = f"data/dataloaders/dataloader_train_{mode}.pt"
+        val_path = f"data/dataloaders/dataloader_val_{mode}.pt"
+        if not os.path.exists(train_path):
+            raise FileNotFoundError(f"No se encontró el dataloader de train en {train_path}. Ejecuta src/data_loader.py primero.")
+        if not os.path.exists(val_path):
+            raise FileNotFoundError(f"No se encontró el dataloader de val en {val_path}. Ejecuta src/data_loader.py primero.")
+        self.train_loader = torch.load(train_path)
+        self.val_loader = torch.load(val_path)
+        print(f"[INFO] DataLoader de train cargado desde {train_path} ({len(self.train_loader)} batches)")
+        print(f"[INFO] DataLoader de val cargado desde {val_path} ({len(self.val_loader)} batches)")
     def setup_model(self):
         """Configurar modelo, optimizador y scheduler."""
         logger.info("Configurando modelo...")
@@ -224,22 +233,11 @@ class Trainer:
             logger.info(f"Entrenamiento distribuido configurado (rank {self.config.hardware.rank})")
     
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """
-        Entrenar una época.
-        
-        Args:
-            epoch: Número de época actual
-            
-        Returns:
-            Diccionario con métricas de entrenamiento
-        """
         self.model.train()
-        
         total_loss = 0.0
         all_predictions = []
         all_targets = []
-        
-        # Barra de progreso profesional
+        n_targets = getattr(self.config.model, 'n_targets', 512)  # valor por defecto
         with Progress(
             SpinnerColumn(),
             "[progress.description]{task.description}",
@@ -251,96 +249,50 @@ class Trainer:
         ) as progress:
             task = progress.add_task(f"[cyan]Entrenando (Epoch {epoch+1})", total=len(self.train_loader))
             for batch_idx, batch in enumerate(self.train_loader):
-                # Mover datos al dispositivo
-                images = batch['image'].to(self.device)
-                targets = batch['mask'].to(self.device)
-                
-                # Forward pass con mixed precision
+                images = batch['image']
+                labels = batch['labels']
+                images = torch.stack(images).to(self.device)
+                padded_labels = []
+                for l in labels:
+                    l = l.clone()
+                    if l.numel() < n_targets:
+                        l = torch.cat([l, torch.full((n_targets - l.numel(),), -1, dtype=l.dtype)])
+                    padded_labels.append(l[:n_targets])
+                targets = torch.stack(padded_labels).to(self.device).float()  # [B, n_targets]
+                logits = self.model(images)  # [B, n_targets]
+                mask_valid = (targets != -1)
+                loss = calculate_loss(logits[mask_valid], targets[mask_valid], self.config.training.loss_function, self.config.training.class_weights)
                 if self.config.hardware.use_amp:
-                    with torch.amp.autocast('cuda'):
-                        predictions = self.model(images)
-                        # Asegurar shape compatible para la loss
-                        if targets.ndim == 3:
-                            targets = targets.unsqueeze(1)
-                        targets = targets.float()
-                        loss = calculate_loss(
-                            predictions, targets,
-                            self.config.training.loss_function,
-                            self.config.training.class_weights
-                        )
-                    
-                    # Backward pass
                     self.scaler.scale(loss).backward()
-                    
-                    # Gradient accumulation
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
                         self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(),
-                            self.config.hardware.max_grad_norm
-                        )
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.hardware.max_grad_norm)
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
                         self.optimizer.zero_grad()
                 else:
-                    # Forward pass normal
-                    predictions = self.model(images)
-                    # Asegurar shape compatible para la loss
-                    if targets.ndim == 3:
-                        targets = targets.unsqueeze(1)
-                    targets = targets.float()
-                    loss = calculate_loss(
-                        predictions, targets,
-                        self.config.training.loss_function,
-                        self.config.training.class_weights
-                    )
-                    
-                    # Backward pass
                     loss.backward()
-                    
-                    # Gradient accumulation
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(),
-                            self.config.hardware.max_grad_norm
-                        )
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.hardware.max_grad_norm)
                         self.optimizer.step()
                         self.optimizer.zero_grad()
-                
-                # Acumular métricas
                 total_loss += loss.item()
-                all_predictions.append(predictions.detach())
-                all_targets.append(targets.detach())
-                
-                # Actualizar barra de progreso
+                all_predictions.append(logits[mask_valid].detach().cpu())
+                all_targets.append(targets[mask_valid].detach().cpu())
                 progress.update(task, advance=1, description=f"[cyan]Entrenando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
-            
-        # Calcular métricas finales
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        
         metrics = calculate_metrics(all_predictions, all_targets)
         metrics['loss'] = total_loss / len(self.train_loader)
-        
         return metrics
-    
+
     def validate_epoch(self, epoch: int) -> Dict[str, float]:
-        """
-        Validar una época.
-        
-        Args:
-            epoch: Número de época actual
-            
-        Returns:
-            Diccionario con métricas de validación
-        """
         self.model.eval()
-        
         total_loss = 0.0
         all_predictions = []
         all_targets = []
         all_images = []
-        
+        n_targets = getattr(self.config.model, 'n_targets', 512)
         with torch.no_grad():
             with Progress(
                 SpinnerColumn(),
@@ -353,63 +305,29 @@ class Trainer:
             ) as progress:
                 task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=len(self.val_loader))
                 for batch_idx, batch in enumerate(self.val_loader):
-                    # Mover datos al dispositivo
-                    images = batch['image'].to(self.device)
-                    targets = batch['mask'].to(self.device)
-                    
-                    # Forward pass
-                    if self.config.hardware.use_amp:
-                        with autocast():
-                            predictions = self.model(images)
-                            if targets.ndim == 3:
-                                targets = targets.unsqueeze(1)
-                            targets = targets.float()
-                            loss = calculate_loss(
-                                predictions, targets,
-                                self.config.training.loss_function,
-                                self.config.training.class_weights
-                            )
-                    else:
-                        predictions = self.model(images)
-                        if targets.ndim == 3:
-                            targets = targets.unsqueeze(1)
-                        targets = targets.float()
-                        loss = calculate_loss(
-                            predictions, targets,
-                            self.config.training.loss_function,
-                            self.config.training.class_weights
-                        )
-                    
-                    # Acumular métricas
+                    images = batch['image']
+                    labels = batch['labels']
+                    images = torch.stack(images).to(self.device)
+                    padded_labels = []
+                    for l in labels:
+                        l = l.clone()
+                        if l.numel() < n_targets:
+                            l = torch.cat([l, torch.full((n_targets - l.numel(),), -1, dtype=l.dtype)])
+                        padded_labels.append(l[:n_targets])
+                    targets = torch.stack(padded_labels).to(self.device).float()
+                    logits = self.model(images)  # [B, n_targets]
+                    mask_valid = (targets != -1)
+                    loss = calculate_loss(logits[mask_valid], targets[mask_valid], self.config.training.loss_function, self.config.training.class_weights)
                     total_loss += loss.item()
-                    all_predictions.append(predictions)
-                    all_targets.append(targets)
-                    
-                    # Guardar algunas imágenes para visualización
+                    all_predictions.append(logits[mask_valid].detach().cpu())
+                    all_targets.append(targets[mask_valid].detach().cpu())
                     if batch_idx == 0:
-                        all_images.append(images[:4])
+                        all_images.append(images[:4].cpu())
                     progress.update(task, advance=1, description=f"[magenta]Validando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
-        
-        # Calcular métricas finales
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        
         metrics = calculate_metrics(all_predictions, all_targets)
         metrics['loss'] = total_loss / len(self.val_loader)
-        
-        # Visualizar predicciones
-        if self.config.logging.log_images and epoch % self.config.logging.log_images_frequency == 0:
-            if all_images:
-                images_to_viz = torch.cat(all_images, dim=0)[:4]
-                targets_to_viz = all_targets[:4]
-                predictions_to_viz = all_predictions[:4]
-                
-                viz_path = f"{self.config.logging.output_dir}/predictions_epoch_{epoch+1}.png"
-                visualize_predictions(
-                    images_to_viz, targets_to_viz, predictions_to_viz,
-                    save_path=viz_path, num_samples=4
-                )
-        
         return metrics
     
     def update_scheduler(self, val_metric: float):
@@ -492,6 +410,8 @@ class Trainer:
         # Guardar configuración
         self.config.save(self.config.logging.output_dir)
         
+        print()
+
         # Ciclo de entrenamiento
         best_f1 = 0.0
         best_epoch = 0
@@ -515,17 +435,21 @@ class Trainer:
                 for key in val_metrics:
                     if f'val_{key}' in self.metrics_history:
                         self.metrics_history[f'val_{key}'].append(val_metrics[key])
+                # Guardar el mejor modelo SOLO EN MEMORIA
                 if val_metrics['f1_score'] > best_f1:
                     best_f1 = val_metrics['f1_score']
                     best_epoch = epoch+1
-                    console.print(f"[bold yellow]Nuevo mejor modelo (F1={best_f1:.4f}) guardado en epoch {best_epoch}")
+                    console.print(f"[bold yellow]Nuevo mejor modelo (F1={best_f1:.4f}) guardado en memoria en epoch {best_epoch}")
+                    self.best_model_state = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in self.model.state_dict().items()}
+                    self.best_optimizer_state = self.optimizer.state_dict()
+                    self.best_epoch = epoch
+                    self.best_train_metrics = train_metrics.copy()
+                    self.best_val_metrics = val_metrics.copy()
                 self.update_scheduler(val_metrics['f1_score'])
                 if self.check_early_stopping(val_metrics['f1_score']):
                     console.print(f"[bold red]Early stopping activado en epoch {epoch+1}")
                     break
-                is_best = val_metrics['f1_score'] > self.best_metric
-                if epoch % self.config.training.save_frequency == 0 or is_best:
-                    self.save_checkpoint(epoch, train_metrics, val_metrics, is_best)
+                # Guardar checkpoint regular si corresponde
             else:
                 step = epoch * len(self.train_loader)
                 log_metrics(
@@ -538,7 +462,18 @@ class Trainer:
                 )
                 console.print(f"[cyan]Train - Loss: {train_metrics['loss']:.4f}, F1: {train_metrics['f1_score']:.4f}, IoU: {train_metrics['iou']:.4f}")
         
-        # Guardar modelo final
+        # Guardar el mejor modelo a disco al final
+        if self.best_model_state is not None:
+            self.model.load_state_dict(self.best_model_state)
+            self.optimizer.load_state_dict(self.best_optimizer_state)
+            self.save_checkpoint(
+                self.best_epoch,
+                self.best_train_metrics,
+                self.best_val_metrics,
+                is_best=True
+            )
+            console.print(f"[bold green]Mejor modelo guardado en disco en epoch {self.best_epoch+1}")
+        # Guardar modelo final si corresponde
         if self.config.training.save_last:
             self.save_checkpoint(
                 self.config.training.epochs - 1,
@@ -547,9 +482,7 @@ class Trainer:
             )
         
         # Graficar historial de métricas
-        plot_path = f"{self.config.logging.output_dir}/metrics_history.png"
-        plot_metrics_history(self.metrics_history, save_path=plot_path)
-        
+        # (Eliminado: no se genera gráfico de historial de métricas)
         console.rule("[bold green]Entrenamiento completado")
         console.print(f"[bold green]Mejor F1: {best_f1:.4f} en epoch {best_epoch}")
         
@@ -561,15 +494,15 @@ class Trainer:
 def main():
     """Función principal para ejecutar el entrenamiento."""
     parser = argparse.ArgumentParser(description="Entrenamiento de modelo de detección de daños")
-    parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML")
+    parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML",default="config.yaml")
     parser.add_argument("--resume", type=str, help="Ruta al checkpoint para resumir")
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
-    parser.add_argument("--epochs", type=int, help="Número de épocas")
+    parser.add_argument("--epochs", type=int, help="Número de épocas",default=1)
     parser.add_argument("--batch_size", type=int, help="Tamaño de batch")
     parser.add_argument("--lr", type=float, help="Learning rate")
-    parser.add_argument("--model", type=str, help="Nombre del modelo",default='linear')
+    parser.add_argument("--model", type=str, help="Nombre del modelo",default='linear_per_tile')
     parser.add_argument("--distributed", action="store_true", help="Usar entrenamiento distribuido")
-    
+    parser.add_argument("--prueba", action="store_true", help="Si se usa, emplea dataloader_small en vez de full",default=True)
     args = parser.parse_args()
     
     # Cargar configuración
@@ -591,6 +524,8 @@ def main():
         config.model.model_name = args.model
     if args.distributed:
         config.hardware.distributed = True
+    # Nuevo: modo prueba
+    config.data.split = 'small' if args.prueba else 'full'
     
     # Crear trainer y ejecutar entrenamiento
     trainer = Trainer(config)

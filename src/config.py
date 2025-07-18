@@ -43,6 +43,10 @@ class DataConfig:
     # Configuración de aumentos
     use_augmentation: bool = True
     augmentation_prob: float = 0.5
+    # Split de datos a usar (full, small, etc)
+    split: str = "full"
+    # Modo de dataset (basic, intermediate, etc)
+    mode: str = "basic"
 
 
 @dataclass
@@ -71,6 +75,9 @@ class ModelConfig:
     in_features: int = 1572864      # Número de características de entrada para modelos lineales
     # Número de salidas para modelos lineales o custom
     out_features: int = 1     # Número de salidas para modelos lineales o custom
+    # NUEVO: para modelo linear_per_tile
+    tile_size: int = 512
+    n_targets: int = 300
 
 
 @dataclass
@@ -199,6 +206,17 @@ class Config:
         """Cargar configuración desde archivo YAML."""
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
+        # Convertir subcampos a dataclasses
+        if 'data' in config_dict and isinstance(config_dict['data'], dict):
+            config_dict['data'] = DataConfig(**config_dict['data'])
+        if 'model' in config_dict and isinstance(config_dict['model'], dict):
+            config_dict['model'] = ModelConfig(**config_dict['model'])
+        if 'training' in config_dict and isinstance(config_dict['training'], dict):
+            config_dict['training'] = TrainingConfig(**config_dict['training'])
+        if 'hardware' in config_dict and isinstance(config_dict['hardware'], dict):
+            config_dict['hardware'] = HardwareConfig(**config_dict['hardware'])
+        if 'logging' in config_dict and isinstance(config_dict['logging'], dict):
+            config_dict['logging'] = LoggingConfig(**config_dict['logging'])
         return cls(**config_dict)
     
     def to_yaml(self, yaml_path: str):

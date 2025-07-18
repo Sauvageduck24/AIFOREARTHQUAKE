@@ -418,6 +418,23 @@ class TransformerBlock(nn.Module):
         return attn_output
 
 
+class LinearPerTile(nn.Module):
+    """
+    Modelo lineal que toma la imagen aplanada y predice un vector de tamaño n_targets (número máximo de fids por tile).
+    """
+    def __init__(self, in_channels, tile_size, n_targets):
+        super().__init__()
+        self.in_features = in_channels * tile_size * tile_size
+        self.n_targets = n_targets
+        self.linear = nn.Linear(self.in_features, n_targets)
+    def forward(self, x):
+        # x: [B, C, H, W] -> [B, in_features]
+        B = x.size(0)
+        x = x.view(B, -1)
+        out = self.linear(x)
+        return out  # [B, n_targets]
+
+
 def get_model(config: ModelConfig) -> nn.Module:
     """
     Crear modelo según la configuración.
@@ -426,7 +443,14 @@ def get_model(config: ModelConfig) -> nn.Module:
     Returns:
         Modelo de PyTorch
     """
-    if config.model_name == "linear":
+    if config.model_name == "linear_per_tile":
+        # Debes pasar config.n_targets (máximo número de fids por tile)
+        model = LinearPerTile(
+            in_channels=config.in_channels,
+            tile_size=config.tile_size,
+            n_targets=config.n_targets
+        )
+    elif config.model_name == "linear":
         # Modelo lineal por píxel (convolución 1x1 para segmentación)
         model = nn.Conv2d(config.in_channels, config.out_channels, kernel_size=1)
     elif config.model_name == "unet":

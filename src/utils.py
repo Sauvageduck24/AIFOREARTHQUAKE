@@ -103,32 +103,27 @@ def calculate_metrics(
     Returns:
         Diccionario con métricas calculadas
     """
-    # Aplicar sigmoid si es necesario
-    if predictions.shape[1] == 1:
-        probs = torch.sigmoid(predictions)
-    else:
-        probs = F.softmax(predictions, dim=1)
-        probs = probs[:, 1:2]  # Tomar solo la clase positiva
+    # Si predictions es 1D, no accedemos a shape[1]
+    if predictions.ndim > 1 and predictions.shape[1] == 1:
+        predictions = predictions.squeeze(1)
+    if targets.ndim > 1 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)
     
     # Binarizar predicciones
-    preds = (probs > threshold).float()
-    
-    # Convertir a numpy para cálculos
-    preds_np = preds.cpu().numpy().flatten()
-    targets_np = targets.cpu().numpy().flatten()
-    probs_np = probs.cpu().numpy().flatten()
+    preds_bin = (torch.sigmoid(predictions) > threshold).float()
+    targets_bin = targets.float()
     
     # Calcular métricas básicas
-    tp = np.sum((preds_np == 1) & (targets_np == 1))
-    tn = np.sum((preds_np == 0) & (targets_np == 0))
-    fp = np.sum((preds_np == 1) & (targets_np == 0))
-    fn = np.sum((preds_np == 0) & (targets_np == 1))
+    tp = ((preds_bin == 1) & (targets_bin == 1)).sum().item()
+    tn = ((preds_bin == 0) & (targets_bin == 0)).sum().item()
+    fp = ((preds_bin == 1) & (targets_bin == 0)).sum().item()
+    fn = ((preds_bin == 0) & (targets_bin == 1)).sum().item()
     
     # Evitar división por cero
     epsilon = 1e-7
     
     # Métricas de clasificación
-    accuracy = (tp + tn) / (tp + tn + fp + fn + epsilon)
+    accuracy = (preds_bin == targets_bin).float().mean().item()
     precision = tp / (tp + fp + epsilon)
     recall = tp / (tp + fn + epsilon)
     f1_score = 2 * (precision * recall) / (precision + recall + epsilon)
@@ -143,14 +138,14 @@ def calculate_metrics(
     
     # Calcular AUC-ROC
     try:
-        fpr, tpr, _ = roc_curve(targets_np, probs_np)
+        fpr, tpr, _ = roc_curve(targets_bin.cpu().numpy(), preds_bin.cpu().numpy())
         auc_roc = auc(fpr, tpr)
     except:
         auc_roc = 0.0
     
     # Calcular AUC-PR
     try:
-        precision_curve, recall_curve, _ = precision_recall_curve(targets_np, probs_np)
+        precision_curve, recall_curve, _ = precision_recall_curve(targets_bin.cpu().numpy(), preds_bin.cpu().numpy())
         auc_pr = auc(recall_curve, precision_curve)
     except:
         auc_pr = 0.0
@@ -190,12 +185,15 @@ def calculate_loss(
         Tensor con el valor de pérdida
     """
     if loss_type == "bce":
-        if predictions.shape[1] == 1:
-            loss = F.binary_cross_entropy_with_logits(
-                predictions, targets, pos_weight=class_weights
-            )
+        if predictions.ndim > 1 and predictions.shape[1] == 1:
+            predictions = predictions.squeeze(1)
+        if targets.ndim > 1 and targets.shape[1] == 1:
+            targets = targets.squeeze(1)
+        if class_weights is not None:
+            class_weights = torch.tensor(class_weights, device=predictions.device, dtype=predictions.dtype)
+            loss = F.binary_cross_entropy_with_logits(predictions, targets, pos_weight=class_weights)
         else:
-            loss = F.cross_entropy(predictions, targets.long().squeeze(1), weight=class_weights)
+            loss = F.binary_cross_entropy_with_logits(predictions, targets)
     
     elif loss_type == "dice":
         loss = dice_loss(predictions, targets)

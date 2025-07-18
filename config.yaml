@@ -1,0 +1,41 @@
+model:
+  model_name: linear_per_tile
+  in_channels: 6         # Cambia según tus datos (ej. 6 si usas 3 pre + 3 post)
+  tile_size: 512         # Tamaño de tus tiles
+  n_targets: 300         # Máximo número de fids por tile (ajusta según tu dataset)
+  dropout: 0.1
+  attention: false
+
+data:
+  processed_data_path: data/preprocessed
+  batch_size: 8
+  num_workers: 2
+  pin_memory: true
+  split: full
+  mode: basic
+
+training:
+  epochs: 10
+  learning_rate: 0.001
+  weight_decay: 0.0
+  optimizer: adam
+  scheduler: cosine
+  loss_function: bce
+  val_frequency: 1
+  save_frequency: 5
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.0001
+
+hardware:
+  device: auto
+  use_amp: true
+
+logging:
+  log_dir: outputs/logs
+  tensorboard: true
+  wandb: false
+  output_dir: outputs
+  models_dir: outputs/models
+  predictions_dir: outputs/predictions
+  log_frequency: 10
+  log_images: false 

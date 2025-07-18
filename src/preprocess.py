@@ -44,6 +44,10 @@ import shutil
 from rich.console import Console
 from rich.text import Text
 from rich.progress import track
+from pyproj import CRS        # NUEVO
+from shapely.geometry import box
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 console = Console()
 
@@ -51,11 +55,13 @@ console = Console()
 RAW_DATA_ROOT = Path("data/international-charter-eo4ai-etq-challenge/Training")
 OUTPUT_ROOT = Path("data/preprocessed")
 TILE_SIZE = 512
-TILE_OVERLAP = 64
+TILE_OVERLAP = 128  # Increase overlap for better coverage
 VALID_BANDS = ['blue', 'green', 'red', 'nir', 'pan']
-MIN_VALID_PIXELS = 0.01  # Porcentaje de exigencia para descartar tiles, cuanto mas alto mayor descarte
+MIN_VALID_PIXELS = 0.001  # Lower threshold to 0.5%
 DEFAULT_SEED = 42
+DEBUG_DIR = OUTPUT_ROOT / "debug_rasters"  # For alignment visualizations
 
+VERBOSE = False
 # 1. Definir estructura de estadísticas por banda y pre/post
 BAND_NAMES = ['blue', 'green', 'red', 'nir']
 
@@ -146,9 +152,14 @@ def read_stac(raw_data_root: Path) -> Generator[Dict, None, None]:
             console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: Annotation directory missing")
             continue
             
-        gpkg_files = list(ann_city_dir.glob("*.gpkg"))
+        # MODIFICACIÓN: Filtrar solo archivos _training y _testing
+        gpkg_files = [
+            f for f in ann_city_dir.glob("*.gpkg")
+            if f.stem.lower().endswith(("_training", "_testing"))
+        ]
+        
         if not gpkg_files:
-            console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: No annotation files")
+            console.print(f"[yellow][WARN][/yellow] Skipping {city_dir.name}: No training/testing annotation files")
             continue
             
         # Process scenes
@@ -307,6 +318,77 @@ def coregister(
         console.print(f"[yellow][WARN][/yellow] Coregistration failed: {str(e)}")
         return moving_img
 
+def _shift_utm_zone(epsg_code: int, delta: int) -> CRS:
+    """
+    Cambia la zona UTM de un EPSG dado en ±1.
+
+    Ej: EPSG:32636 con delta=+1 → EPSG:32637
+        EPSG:32637 con delta=-1 → EPSG:32636
+
+    Soporta:
+        - 326xx: UTM Norte
+        - 327xx: UTM Sur
+    """
+    if not (32601 <= epsg_code <= 32660 or 32701 <= epsg_code <= 32760):
+        raise ValueError(f"EPSG {epsg_code} no parece ser UTM")
+
+    base = 32600 if epsg_code < 32700 else 32700
+    zone = epsg_code % 100
+    new_zone = zone + delta
+
+    if not (1 <= new_zone <= 60):
+        raise ValueError(f"Zona UTM resultante inválida: {new_zone}")
+
+    return CRS.from_epsg(base + new_zone)
+
+def _bbox_iou(bounds_a, bounds_b):
+    """
+    Calcula la IoU (intersección sobre unión) entre dos bounding boxes.
+    bounds = (minx, miny, maxx, maxy)
+    """
+    minx1, miny1, maxx1, maxy1 = bounds_a
+    minx2, miny2, maxx2, maxy2 = bounds_b
+
+    ixmin = max(minx1, minx2)
+    iymin = max(miny1, miny2)
+    ixmax = min(maxx1, maxx2)
+    iymax = min(maxy1, maxy2)
+
+    iw = max(0, ixmax - ixmin)
+    ih = max(0, iymax - iymin)
+    intersection = iw * ih
+
+    area_a = (maxx1 - minx1) * (maxy1 - miny1)
+    area_b = (maxx2 - minx2) * (maxy2 - miny2)
+    union = area_a + area_b - intersection
+
+    return intersection / union if union > 0 else 0
+
+# ------------- NUEVO BLOQUE -----------------------------------------------
+def smart_read_vector(path: Path, raster_crs, raster_bbox):
+    gdf = gpd.read_file(path)
+
+    if gdf.crs is None:
+        # ① WGS-84 por defecto
+        gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+
+    # ② Si tras proyectar a raster_crs no hay solape,
+    #    prueba la zona UTM adyacente (+1 / −1)
+    gdf_proj = gdf.to_crs(raster_crs)
+    if gdf_proj.total_bounds[0] > 1e7:      # heurística: está a >10 000 km
+        for delta in (-1, 1):
+            try:
+                alt_crs = _shift_utm_zone(raster_crs, delta)
+                gdf_alt = gdf.to_crs(alt_crs)
+                if _bbox_iou(gdf_alt.total_bounds, raster_bbox) > 0.1:
+                    console.print(f"[cyan]CRS alternativo elegido:{alt_crs}[/cyan]")
+                    gdf_proj = gdf_alt
+                    break
+            except Exception:
+                pass
+    return gdf_proj
+# --------------------------------------------------------------------------
+
 def rasterize_labels(
     gpkg_path: Path, 
     transform: rasterio.Affine,
@@ -314,26 +396,36 @@ def rasterize_labels(
     crs_raster,  # nuevo argumento
     binary: bool = False
 ) -> np.ndarray:
-    """
-    Efficient label rasterization with error handling
-    """
+    """Enhanced rasterization with detailed validation and buffer for intersection"""
     try:
-        gdf = gpd.read_file(gpkg_path)
-        if VERBOSE:
-            print(f"[RASTERIZE] GPKG CRS: {gdf.crs}")
-            print(f"[RASTERIZE] GPKG bounds: {gdf.total_bounds}")
-            print(f"[RASTERIZE] GPKG rows: {len(gdf)}")
-        if VERBOSE:
-            print(f"[RASTERIZE] Raster shape: {shape}")
-            print(f"[RASTERIZE] Raster transform: {transform}")
-        # Reproyectar si es necesario
-        if gdf.crs != crs_raster:
-            gdf = gdf.to_crs(crs_raster)
-            if VERBOSE:
-                print(f"[RASTERIZE] GPKG reproyectado a: {gdf.crs}")
-        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+        from shapely.geometry import box
+        # Bounding box del raster en CRS nativo
+        raster_bbox = box(*rasterio.transform.array_bounds(*shape, transform))
+        gdf = smart_read_vector(gpkg_path, crs_raster, raster_bbox)
+        
+        # Crear polígono del raster con buffer de tolerancia (5 metros)
+        raster_bounds = rasterio.transform.array_bounds(shape[0], shape[1], transform)
+        raster_poly = box(*raster_bounds).buffer(5)  # Buffer de 5 metros
+        
+        # Reprojectar el polígono al CRS del vector si es necesario
+        if gdf.crs and gdf.crs != crs_raster:
+            raster_poly = gpd.GeoSeries([raster_poly], crs=crs_raster).to_crs(gdf.crs)[0]
+        
+        # Filtrar características que intersectan con el buffer
+        gdf = gdf[gdf.intersects(raster_poly)]
         
         if gdf.empty:
+            console.print(f"[WARN] No features intersect raster (with buffer): {gpkg_path.name}")
+            # Extra debug info
+            console.print(f"[DEBUG] Raster bounds: {raster_bounds}")
+            console.print(f"[DEBUG] Raster poly: {raster_poly}")
+            console.print(f"[DEBUG] Vector CRS: {gdf.crs}")
+            try:
+                # Project vector to raster CRS for bounds comparison
+                gdf_proj = gdf.to_crs(crs_raster)
+                console.print(f"[DEBUG] Vector total_bounds (projected): {gdf_proj.total_bounds}")
+            except Exception as e:
+                console.print(f"[DEBUG] Could not project vector to raster CRS: {e}")
             return np.zeros(shape, dtype=np.uint8)
         
         # Handle damage classification (ajustado para binarizar y marcar desconocidos)
@@ -360,11 +452,11 @@ def rasterize_labels(
         )
         return mask
     except Exception as e:
-        console.print(f"[red][ERROR][/red] Rasterization failed for {gpkg_path}: {str(e)}")
+        console.print(f"[ERROR] Rasterization failed: {str(e)}")
         return np.zeros(shape, dtype=np.uint8)
 
 def process_scene(scene: Dict, output_root: Path, tile_size: int, tile_overlap: int,
-                  binary: bool, debug_vis: int) -> Tuple[Dict, BandStats, List]:
+                  binary: bool, debug_vis: int, min_valid_pixels: float = MIN_VALID_PIXELS) -> Tuple[Dict, BandStats, List]:
     with rasterio.open(scene["img_paths"]["pre"]["red"]) as ref:
         transform, (height, width) = ref.transform, (ref.height, ref.width)
         crs_raster = ref.crs
@@ -377,6 +469,19 @@ def process_scene(scene: Dict, output_root: Path, tile_size: int, tile_overlap: 
     mask = rasterize_labels(Path(scene["label_path"]), transform, (height, width), crs_raster, binary)
     if VERBOSE:
         print(f"Valores únicos en la máscara de la escena {scene['id']}: {np.unique(mask)}")
+
+    # Save label raster for debugging
+    DEBUG_DIR.mkdir(exist_ok=True)
+    mask_path = DEBUG_DIR / f"{scene['id']}_mask.tif"
+    with rasterio.open(mask_path, 'w', 
+                       driver='GTiff',
+                       height=height,
+                       width=width,
+                       count=1,
+                       dtype=np.uint8,
+                       crs=crs_raster,
+                       transform=transform) as dst:
+        dst.write(mask, 1)
 
     y_starts = range(0, height, tile_size - tile_overlap)
     x_starts = range(0, width,  tile_size - tile_overlap)
@@ -393,7 +498,7 @@ def process_scene(scene: Dict, output_root: Path, tile_size: int, tile_overlap: 
             win = Window(x, y, tile_size, tile_size)
             tile_mask = mask[y:y+tile_size, x:x+tile_size]
             valid_pct = np.mean(tile_mask != 0)
-            if np.all(tile_mask == 0) or valid_pct < MIN_VALID_PIXELS:
+            if np.all(tile_mask == 0) or valid_pct < min_valid_pixels:
                 continue
 
             # ── lectura rápida ─────────────────────────────────────────────
@@ -536,11 +641,13 @@ def main():
     parser.add_argument("--output_root", type=str, default=str(OUTPUT_ROOT), help="Output root directory")
     parser.add_argument("--small_pct", type=float, default=0.1, help="Fraction of tiles per city for small split")
     parser.add_argument("--binary", action="store_true", help="Collapse mask to binary (0/1)",default=True)
-    parser.add_argument("--workers", type=int, default=1, help="Number of parallel workers")
+    parser.add_argument("--workers", type=int, default=8, help="Number of parallel workers")
     parser.add_argument("--debug_vis", type=int, default=0, help="Save N debug overlay PNGs")
     parser.add_argument("--verbose", action="store_true", help="Mostrar información detallada de depuración",default=False)
-    parser.add_argument("--prueba", action="store_true", help="Procesar solo una ciudad para pruebas rápidas",default=True)
+    parser.add_argument("--prueba", action="store_true", help="Procesar solo una ciudad para pruebas rápidas",default=False)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Seed para reproducibilidad")
+    parser.add_argument("--min_pixels", type=float, default=MIN_VALID_PIXELS, help="Minimum valid pixel percentage")
+    parser.add_argument("--tile_overlap", type=int, default=TILE_OVERLAP, help="Tile overlap in pixels")
     args = parser.parse_args()
     
     global VERBOSE
@@ -577,19 +684,24 @@ def main():
         console.print(f"[bold red][ERROR][/bold red] No valid scenes found for processing")
         raise RuntimeError("No valid scenes found for processing")
 
+    console.print(f"[bold green]Total scenes found for processing: {len(scenes)}[/bold green]")
+    for i, scene in enumerate(scenes):
+        console.print(f"[cyan]Scene {i+1}/{len(scenes)}: {scene['id']} (city: {scene['city']})[/cyan]")
+
     if args.prueba:
         console.print("[bold cyan][INFO][/bold cyan] Modo prueba activado: solo se procesarán 3 escenas.")
-        scenes = scenes[:3]
+        scenes = scenes[4:6]
 
-    console.print(f"[bold green]Found {len(scenes)} scenes to process[/bold green]")
+    console.print(f"[bold green]Processing {len(scenes)} scenes...[/bold green]")
     
     # Process with multiprocessing
     params = {
         'output_root': output_root,
         'tile_size': TILE_SIZE,
-        'tile_overlap': TILE_OVERLAP,
+        'tile_overlap': args.tile_overlap,
         'binary': args.binary,
-        'debug_vis': args.debug_vis
+        'debug_vis': args.debug_vis,
+        'min_valid_pixels': args.min_pixels
     }
     
     all_meta = {s: [] for s in ['full', 'small', 'test']}
@@ -600,27 +712,36 @@ def main():
         total_time = 0
         for i, scene in enumerate(tqdm(scenes, desc="Processing scenes")):
             start_time = time.time()
-            if VERBOSE:
-                print(f"[INFO] Processing scene {i+1}/{len(scenes)}: {scene['id']}")
-            meta, band_stats, debug = process_scene(
-                scene,
-                params['output_root'],
-                params['tile_size'],
-                params['tile_overlap'],
-                params['binary'],
-                params['debug_vis']
-            )
+            console.print(f"[yellow]Processing scene {i+1}/{len(scenes)}: {scene['id']} (city: {scene['city']})[/yellow]")
+            try:
+                meta, band_stats, debug = process_scene(
+                    scene,
+                    params['output_root'],
+                    params['tile_size'],
+                    params['tile_overlap'],
+                    params['binary'],
+                    params['debug_vis'],
+                    params['min_valid_pixels']
+                )
+            except Exception as e:
+                console.print(f"[red][ERROR][/red] Failed to process scene {scene['id']}: {str(e)}")
+                continue
             elapsed = time.time() - start_time
-            total_time += elapsed
             tqdm.write(f"[INFO] Scene {i+1}/{len(scenes)} procesada en {elapsed:.2f} segundos. Tiempo acumulado: {total_time:.2f} segundos.")
             for split in all_meta:
+                n_before = len(all_meta[split])
                 all_meta[split].extend(meta[split])
+                n_after = len(all_meta[split])
+                if n_after > n_before:
+                    console.print(f"[green]Added {n_after-n_before} tiles to split '{split}' for scene {scene['id']}[/green]")
             all_band_stats.stats['pre'] = {b: all_band_stats.stats['pre'][b] for b in BAND_NAMES}
             all_band_stats.stats['post'] = {b: all_band_stats.stats['post'][b] for b in BAND_NAMES}
             for t in ['pre', 'post']:
                 for b in BAND_NAMES:
                     all_band_stats.stats[t][b].merge(band_stats.stats[t][b])
             debug_samples.extend(debug)
+            for split in meta:
+                console.print(f"[blue]Scene {scene['id']} - {split} tiles: {len(meta[split])}[/blue]")
     else:
         with mp.Pool(args.workers) as pool:
             results = []
@@ -633,25 +754,34 @@ def main():
                         params['tile_size'], 
                         params['tile_overlap'], 
                         params['binary'], 
-                        params['debug_vis']
+                        params['debug_vis'],
+                        params['min_valid_pixels']
                     )
                 ))
             total_time = 0
             for i, res in enumerate(tqdm(results, desc="Processing scenes")):
                 start_time = time.time()
-                meta, band_stats, debug = res.get()
+                try:
+                    meta, band_stats, debug = res.get()
+                except Exception as e:
+                    console.print(f"[red][ERROR][/red] Failed to process scene in parallel: {str(e)}")
+                    continue
                 elapsed = time.time() - start_time
-                total_time += elapsed
                 tqdm.write(f"[INFO] Scene {i+1}/{len(results)} procesada en {elapsed:.2f} segundos. Tiempo acumulado: {total_time:.2f} segundos.")
                 for split in all_meta:
+                    n_before = len(all_meta[split])
                     all_meta[split].extend(meta[split])
+                    n_after = len(all_meta[split])
+                    if n_after > n_before:
+                        console.print(f"[green]Added {n_after-n_before} tiles to split '{split}' in parallel scene {i+1}[/green]")
                 all_band_stats.stats['pre'] = {b: all_band_stats.stats['pre'][b] for b in BAND_NAMES}
                 all_band_stats.stats['post'] = {b: all_band_stats.stats['post'][b] for b in BAND_NAMES}
                 for t in ['pre', 'post']:
                     for b in BAND_NAMES:
                         all_band_stats.stats[t][b].merge(band_stats.stats[t][b])
                 debug_samples.extend(debug)
-    
+                for split in meta:
+                    console.print(f"[blue]Parallel scene {i+1} - {split} tiles: {len(meta[split])}[/blue]")
     # Hacer el split 'small' como 10% aleatorio de 'full' por ciudad
     pyrandom.seed(args.seed)
     full_tiles_by_city = {}
@@ -682,6 +812,7 @@ def main():
                 small_tiles.append(tile_copy)
             else:
                 new_full_tiles.append(tile)
+        console.print(f"[magenta]City {city}: {len(tiles)} full tiles, {n_small} moved to small split[/magenta]")
     all_meta['full'] = new_full_tiles
     all_meta['small'] = small_tiles
 
@@ -689,11 +820,13 @@ def main():
     for split in all_meta:
         with open(output_root / split / "meta.json", 'w') as f:
             json.dump(all_meta[split], f, indent=2)
+        console.print(f"[bold green]Saved {len(all_meta[split])} tiles to {split}/meta.json[/bold green]")
     
     # Save statistics
     stats_result = all_band_stats.finalize()
     with open(output_root / "stats.json", 'w') as f:
         json.dump(stats_result, f, indent=2)
+    console.print(f"[bold green]Saved band statistics to stats.json[/bold green]")
     
     # Save debug visuals
     if debug_samples:
@@ -701,6 +834,7 @@ def main():
         debug_dir.mkdir(exist_ok=True)
         for i, (img, mask, tile_id) in enumerate(debug_samples[:args.debug_vis]):
             save_debug_vis(img, mask, debug_dir / f"{tile_id}.png")
+        console.print(f"[bold green]Saved {len(debug_samples[:args.debug_vis])} debug visualizations[/bold green]")
     
     tqdm.write("Preprocessing completed successfully\n")
 

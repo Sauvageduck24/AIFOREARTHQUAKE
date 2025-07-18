@@ -1,0 +1,87 @@
+cudnn_benchmark: true
+cudnn_deterministic: false
+data:
+  augmentation_prob: 0.5
+  batch_size: 8
+  channels: 3
+  data_root: data
+  image_size: 512
+  mode: basic
+  num_classes: 2
+  num_workers: 2
+  pin_memory: true
+  processed_data_path: data/preprocessed
+  raw_data_path: data/raw
+  shuffle: true
+  split: small
+  splits_path: data/splits
+  test_split: 0.15
+  train_split: 0.7
+  use_augmentation: true
+  val_split: 0.15
+debug: false
+deterministic: true
+hardware:
+  amp_dtype: float16
+  backend: nccl
+  device: cuda
+  distributed: false
+  gpu_ids:
+  - 0
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  rank: 0
+  use_amp: true
+  world_size: 1
+logging:
+  experiment_name: earthquake_damage_detection
+  log_dir: outputs/logs
+  log_frequency: 10
+  log_images: false
+  log_images_frequency: 50
+  models_dir: outputs/models
+  output_dir: outputs
+  predictions_dir: outputs/predictions
+  run_name: linear_per_tile_resnet50_20250718_174919
+  tensorboard: true
+  wandb: false
+  wandb_entity: null
+  wandb_project: ai4eo-earthquake
+model:
+  activation: sigmoid
+  attention: false
+  backbone: resnet50
+  decoder_channels:
+  - 256
+  - 128
+  - 64
+  - 32
+  - 16
+  dropout: 0.1
+  encoder_depth: 5
+  in_channels: 6
+  in_features: 1572864
+  model_name: linear_per_tile
+  n_targets: 300
+  out_channels: 1
+  out_features: 1
+  pretrained: true
+  tile_size: 512
+seed: 42
+training:
+  class_weights: null
+  early_stopping_min_delta: 0.0001
+  early_stopping_patience: 10
+  epochs: 1
+  learning_rate: 0.001
+  loss_function: bce
+  optimizer: adam
+  save_best_only: true
+  save_frequency: 5
+  save_last: true
+  scheduler: cosine
+  scheduler_factor: 0.5
+  scheduler_patience: 10
+  val_frequency: 1
+  warmup_epochs: 5
+  weight_decay: 0.0
