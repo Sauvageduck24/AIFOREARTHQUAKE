@@ -538,7 +538,7 @@ def main():
     if args.limit:
         gpkg_files = gpkg_files[:args.limit]
 
-    gpkg_files=gpkg_files[:2]
+    #gpkg_files=gpkg_files[:2]
 
     all_meta = []
     for gpkg_path in gpkg_files:

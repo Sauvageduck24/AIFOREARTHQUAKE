@@ -515,6 +515,81 @@ class CNNClassifier(nn.Module):
         return self.classifier(x).squeeze(1)  # (B,)
 
 
+class CNNBackbone(nn.Module):
+    """
+    Backbone CNN para extraer características de una imagen.
+    Igual que la parte de features de CNNClassifier, pero devuelve el vector de features.
+    """
+    def __init__(self, in_channels, dropout=0.2, base=64):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, base, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(base),
+            nn.Conv2d(base, base, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(base),
+            nn.MaxPool2d(2),
+            nn.Dropout2d(dropout),
+
+            nn.Conv2d(base, base*2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(base*2),
+            nn.Conv2d(base*2, base*2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(base*2),
+            nn.MaxPool2d(2),
+            nn.Dropout2d(dropout),
+
+            nn.Conv2d(base*2, base*4, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(base*4),
+            nn.Conv2d(base*4, base*4, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(base*4),
+            nn.AdaptiveAvgPool2d(1)  # → (B, base*4, 1, 1)
+        )
+        self.out_dim = base*4
+        # Inicialización
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)  # (B, out_dim)
+        return x
+
+
+class SiameseCNNClassifier(nn.Module):
+    """
+    Modelo siamés con backbone CNN compartido para pre y post imagen.
+    Entrada: [B, 2*C, H, W] (pre + post concatenados)
+    Salida: logit por tile (clasificación binaria)
+    """
+    def __init__(self, in_channels, dropout=0.2, base=64):
+        super().__init__()
+        self.c = in_channels  # canales por imagen (pre o post)
+        self.backbone = CNNBackbone(in_channels, dropout=dropout, base=base)
+        feat_dim = self.backbone.out_dim
+        # MLP para clasificación final
+        self.classifier = nn.Sequential(
+            nn.Linear(feat_dim * 2, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(128, 1)  # Logit
+        )
+
+    def forward(self, x):
+        # x: [B, 2*C, H, W] -> split en pre y post
+        pre = x[:, :self.c, :, :]
+        post = x[:, self.c:, :, :]
+        feat_pre = self.backbone(pre)   # (B, F)
+        feat_post = self.backbone(post) # (B, F)
+        feat = torch.cat([feat_pre, feat_post], dim=1)  # (B, 2F)
+        logit = self.classifier(feat)  # (B, 1)
+        return logit.squeeze(1)  # (B,)
+
 
 def get_model(config: ModelConfig) -> nn.Module:
     """
@@ -541,6 +616,11 @@ def get_model(config: ModelConfig) -> nn.Module:
     elif config.model_name == "cnn_classifier":
         model = CNNClassifier(
             in_channels=config.in_channels,
+            dropout=getattr(config, 'dropout', 0.2)
+        )
+    elif config.model_name == "siamese_cnn_classifier":
+        model = SiameseCNNClassifier(
+            in_channels=config.in_channels // 2,  # canales por imagen (pre o post)
             dropout=getattr(config, 'dropout', 0.2)
         )
     elif config.model_name == "linear":

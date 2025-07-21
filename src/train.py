@@ -893,14 +893,14 @@ def main():
     parser.add_argument("--epochs", type=int, help="Número de épocas", default=2)
     parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
     parser.add_argument("--lr", default=1e-2, type=float, help="Learning rate")
-    parser.add_argument("--model", type=str, help="Nombre del modelo", default='cnn_classifier')
+    parser.add_argument("--model", type=str, help="Nombre del modelo", default='siamese_cnn_classifier')
     # Cambiar optimizador y scheduler por defecto
     parser.add_argument("--optimizer", type=str, default="adamw", help="Optimizador (adam, adamw, sgd)")
     parser.add_argument("--scheduler", type=str, default="cosine", help="Scheduler (cosine, step, plateau)")
     parser.add_argument("--distributed", action="store_true", help="Usar entrenamiento distribuido")
     parser.add_argument("--small_dataset", action="store_true", help="Usar dataset small para pruebas rápidas")
     parser.add_argument("--small_percentage", type=float, default=0.2, help="Porcentaje para dataset small")
-    parser.add_argument("--mode", type=str, default='pre_only', choices=['pre_post', 'pre_only', 'post_only'],
+    parser.add_argument("--mode", type=str, default='pre_post', choices=['pre_post', 'pre_only', 'post_only'],
                        help='Modo de datos: pre_post, pre_only, post_only')
     parser.add_argument("--max_channels", type=int, help="Máximo número de canales a usar",default=3)
     # NUEVO: Argumentos para tipo de loss y threshold
@@ -957,6 +957,20 @@ def main():
         config.training.swa_start_epoch = args.swa_start_epoch
     
     # Crear trainer y ejecutar entrenamiento
+    # --- Ajuste automático de in_channels para siamese_cnn_classifier ---
+    if config.model.model_name == "siamese_cnn_classifier":
+        # Si el modo es pre_post, el dataloader entrega 2*C canales
+        if hasattr(config.data, 'mode') and config.data.mode == 'pre_post':
+            # Si el usuario puso in_channels = C, lo duplicamos
+            if getattr(config.model, 'in_channels', None) is not None:
+                if config.model.in_channels * 2 != config.data.max_channels * 2:
+                    # Forzamos in_channels a 2*C
+                    config.model.in_channels = config.data.max_channels * 2
+            else:
+                config.model.in_channels = config.data.max_channels * 2
+        else:
+            # Si no es pre_post, advertir
+            print("[WARNING] El modelo siamese_cnn_classifier está pensado para modo pre_post (input 2*C canales)")
     trainer = Trainer(config, use_aug=args.use_aug)
     trainer.train(resume_from=args.resume)
 
