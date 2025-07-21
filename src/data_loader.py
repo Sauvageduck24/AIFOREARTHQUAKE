@@ -230,6 +230,7 @@ def get_dataloaders_aug(config):
     """
     import numpy as np
     from sklearn.model_selection import train_test_split
+    import warnings
     data_root = getattr(config.data, 'data_root', 'preprocessed')
     split = getattr(config.data, 'split', 'full')
     mode = getattr(config.data, 'mode', 'post_only')
@@ -252,25 +253,31 @@ def get_dataloaders_aug(config):
     meta_df = dataset_full.meta_df.copy()
     # --- Split por evento (no aleatorio por tile) ---
     events = meta_df['event'].unique()
-    # Estratificar por proporción de dañados por evento
-    event_labels = meta_df.groupby('event')['damaged'].mean().values
-    stratify_labels = (event_labels > 0.5).astype(int)
-    bincount = np.bincount(stratify_labels)
-    if np.any(bincount < 2):
-        print("[WARNING] No se puede estratificar por evento (al menos una clase tiene <2 eventos). Haciendo split aleatorio por evento.")
-        train_events, val_events = train_test_split(
-            events,
-            test_size=1-split_ratio,
-            random_state=seed,
-            shuffle=True
-        )
+    if len(events) < 2:
+        # No se puede hacer split, usar todo para entrenamiento
+        train_events = events
+        val_events = []
+        warnings.warn("No se puede estratificar por evento (menos de 2 eventos). Usando todo para entrenamiento.")
     else:
-        train_events, val_events = train_test_split(
-            events,
-            test_size=1-split_ratio,
-            random_state=seed,
-            stratify=stratify_labels
-        )
+        # Estratificar por proporción de dañados por evento
+        event_labels = meta_df.groupby('event')['damaged'].mean().values
+        stratify_labels = (event_labels > 0.5).astype(int)
+        bincount = np.bincount(stratify_labels)
+        if np.any(bincount < 2):
+            print("[WARNING] No se puede estratificar por evento (al menos una clase tiene <2 eventos). Haciendo split aleatorio por evento.")
+            train_events, val_events = train_test_split(
+                events,
+                test_size=1-split_ratio,
+                random_state=seed,
+                shuffle=True
+            )
+        else:
+            train_events, val_events = train_test_split(
+                events,
+                test_size=1-split_ratio,
+                random_state=seed,
+                stratify=stratify_labels
+            )
     meta_train = meta_df[meta_df['event'].isin(train_events)].reset_index(drop=True)
     meta_val = meta_df[meta_df['event'].isin(val_events)].reset_index(drop=True)
     # Crear datasets para train y val
@@ -442,7 +449,7 @@ def main():
                        help='Directorio raíz de los datos preprocesados')
     parser.add_argument('--split', type=str, default='full', choices=['full', 'test', 'unknown'],
                        help='Split a usar')
-    parser.add_argument('--mode', type=str, default='pre_post', 
+    parser.add_argument('--mode', type=str, default='pre_only', 
                        choices=['pre_post', 'pre_only', 'post_only'],
                        help='Modo de datos: pre_post, pre_only, post_only')
     parser.add_argument('--filter_has_data', action='store_true', default=False,

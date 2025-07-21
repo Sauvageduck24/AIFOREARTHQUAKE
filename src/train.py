@@ -78,8 +78,12 @@ def get_dataloaders(config):
         filter_has_data = getattr(config.data, 'filter_has_data', True)
         max_channels = getattr(config.data, 'max_channels', None)
         batch_size = config.data.batch_size
-        num_workers = config.data.num_workers
-        pin_memory = getattr(config.data, 'pin_memory', True)
+        # Optimización: Aumentar num_workers y usar pin_memory
+        num_workers = min(os.cpu_count(), 8)  # Usar hasta 8 workers o el número de CPUs disponible
+        pin_memory = True
+        persistent_workers = True  # Mantener workers vivos entre épocas
+        prefetch_factor = 2  # Prefetch de datos
+
         # Cargar dataset completo
         dataset_full = EarthquakeTileDataset(
             data_root=data_root,
@@ -117,13 +121,15 @@ def get_dataloaders(config):
             max_channels=max_channels,
             meta_subset=meta_val
         )
-        # Crear dataloaders
+        # Crear dataloaders optimizados
         train_loader = torch.utils.data.DataLoader(
             dataset_train,
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
             collate_fn=custom_collate
         )
         val_loader = torch.utils.data.DataLoader(
@@ -132,6 +138,8 @@ def get_dataloaders(config):
             shuffle=False,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
             collate_fn=custom_collate
         )
         print(f"[INFO] Datasets cargados: Train: {len(dataset_train)} tiles | Val: {len(dataset_val)} tiles")
@@ -329,13 +337,17 @@ class Trainer:
             logger.info(f"Entrenamiento distribuido configurado (rank {self.config.hardware.rank})")
     
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """Entrenar una época."""
+        """Entrenar una época con optimizaciones de rendimiento."""
         self.model.train()
-        total_loss = 0.0
+        total_loss = torch.tensor(0.0, device=self.device)
         all_predictions = []
         all_targets = []
         threshold = getattr(self.config.training, 'threshold', 0.5)
         label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
+        
+        # Pre-calcular tamaño del dataset para la barra de progreso
+        n_batches = len(self.train_loader)
+        
         with Progress(
             SpinnerColumn(),
             "[progress.description]{task.description}",
@@ -345,55 +357,94 @@ class Trainer:
             console=console,
             transient=True
         ) as progress:
-            task = progress.add_task(f"[cyan]Entrenando (Epoch {epoch+1})", total=len(self.train_loader))
+            task = progress.add_task(f"[cyan]Entrenando (Epoch {epoch+1})", total=n_batches)
+            
+            # Usar torch.cuda.amp.autocast() para mixed precision
+            scaler = self.scaler if self.config.hardware.use_amp else None
+            
             for batch_idx, batch in enumerate(self.train_loader):
-                images = batch['image'].to(self.device)
-                targets = batch['damaged'].to(self.device)
-                if self.config.hardware.use_amp:
-                    with autocast(device_type='cuda'):
+                # Mover datos a GPU de una vez
+                images = batch['image'].to(self.device, non_blocking=True)
+                targets = batch['damaged'].to(self.device, non_blocking=True)
+                
+                # Mixed precision training
+                if scaler is not None:
+                    with autocast(device_type='cuda', dtype=torch.float16):
                         logits = self.model(images)
-                        loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
-                    self.scaler.scale(loss).backward()
+                        loss = calculate_loss(
+                            logits, targets,
+                            self.config.training.loss_function,
+                            self.config.training.class_weights,
+                            label_smoothing=label_smoothing
+                        )
+                    scaler.scale(loss).backward()
+                    
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.hardware.max_grad_norm)
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        self.optimizer.zero_grad()
+                        scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.config.hardware.max_grad_norm
+                        )
+                        scaler.step(self.optimizer)
+                        scaler.update()
+                        self.optimizer.zero_grad(set_to_none=True)  # Más eficiente que zero_grad()
                 else:
                     logits = self.model(images)
-                    loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
+                    loss = calculate_loss(
+                        logits, targets,
+                        self.config.training.loss_function,
+                        self.config.training.class_weights,
+                        label_smoothing=label_smoothing
+                    )
                     loss.backward()
+                    
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.hardware.max_grad_norm)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.config.hardware.max_grad_norm
+                        )
                         self.optimizer.step()
-                        self.optimizer.zero_grad()
-                total_loss += loss.item()
-                if logits.ndim == 2 and logits.shape[1] == 2:
-                    probs = torch.softmax(logits.detach().cpu(), dim=1)[:, 1]
-                else:
-                    probs = torch.sigmoid(logits.detach().cpu())
-                all_predictions.append(probs.view(-1))
-                all_targets.append(targets.detach().cpu().view(-1))
-                if batch_idx % 10 == 0 or batch_idx == len(self.train_loader) - 1:
+                        self.optimizer.zero_grad(set_to_none=True)
+                
+                # Actualizar métricas (mantener en GPU)
+                total_loss += loss.detach()
+                
+                # Calcular probabilidades (mantener en GPU)
+                with torch.no_grad():
+                    if logits.ndim == 2 and logits.shape[1] == 2:
+                        probs = torch.softmax(logits, dim=1)[:, 1]
+                    else:
+                        probs = torch.sigmoid(logits)
+                    all_predictions.append(probs)
+                    all_targets.append(targets)
+                
+                # Actualizar barra de progreso
+                if batch_idx % 10 == 0 or batch_idx == n_batches - 1:
                     progress.update(task, advance=1, description=f"[cyan]Entrenando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
                 else:
                     progress.update(task, advance=1)
+        
+        # Concatenar y calcular métricas (todo en GPU)
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
-        metrics['loss'] = total_loss / len(self.train_loader)
+        metrics['loss'] = (total_loss / n_batches).item()
+        
         return metrics
 
     def validate_epoch(self, epoch: int) -> Dict[str, float]:
-        """Validar una época."""
+        """Validar una época con optimizaciones de rendimiento."""
         self.model.eval()
-        total_loss = 0.0
+        total_loss = torch.tensor(0.0, device=self.device)
         all_predictions = []
         all_targets = []
         threshold = getattr(self.config.training, 'threshold', 0.5)
         label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
-        with torch.no_grad():
+        
+        # Pre-calcular tamaño del dataset
+        n_batches = len(self.val_loader)
+        
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=self.config.hardware.use_amp):
             with Progress(
                 SpinnerColumn(),
                 "[progress.description]{task.description}",
@@ -403,32 +454,45 @@ class Trainer:
                 console=console,
                 transient=True
             ) as progress:
-                task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=len(self.val_loader))
+                task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=n_batches)
+                
                 for batch_idx, batch in enumerate(self.val_loader):
-                    images = batch['image'].to(self.device)
-                    targets = batch['damaged'].to(self.device)
-                    if self.config.hardware.use_amp:
-                        with autocast(device_type='cuda'):
-                            logits = self.model(images)
-                            loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
-                    else:
-                        logits = self.model(images)
-                        loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
-                    total_loss += loss.item()
+                    # Mover datos a GPU de una vez
+                    images = batch['image'].to(self.device, non_blocking=True)
+                    targets = batch['damaged'].to(self.device, non_blocking=True)
+                    
+                    # Forward pass con mixed precision
+                    logits = self.model(images)
+                    loss = calculate_loss(
+                        logits, targets,
+                        self.config.training.loss_function,
+                        self.config.training.class_weights,
+                        label_smoothing=label_smoothing
+                    )
+                    
+                    # Actualizar métricas (mantener en GPU)
+                    total_loss += loss
+                    
+                    # Calcular probabilidades (mantener en GPU)
                     if logits.ndim == 2 and logits.shape[1] == 2:
-                        probs = torch.softmax(logits.detach().cpu(), dim=1)[:, 1]
+                        probs = torch.softmax(logits, dim=1)[:, 1]
                     else:
-                        probs = torch.sigmoid(logits.detach().cpu())
-                    all_predictions.append(probs.view(-1))
-                    all_targets.append(targets.detach().cpu().view(-1))
-                    if batch_idx % 10 == 0 or batch_idx == len(self.val_loader) - 1:
+                        probs = torch.sigmoid(logits)
+                    all_predictions.append(probs)
+                    all_targets.append(targets)
+                    
+                    # Actualizar barra de progreso
+                    if batch_idx % 10 == 0 or batch_idx == n_batches - 1:
                         progress.update(task, advance=1, description=f"[magenta]Validando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
                     else:
                         progress.update(task, advance=1)
+        
+        # Concatenar y calcular métricas (todo en GPU)
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
-        metrics['loss'] = total_loss / len(self.val_loader)
+        metrics['loss'] = (total_loss / n_batches).item()
+        
         return metrics
     
     def update_scheduler(self, val_metric: float):
@@ -623,7 +687,8 @@ class Trainer:
             
             train_metrics = self.train_epoch(epoch)
             
-            if epoch % self.config.training.val_frequency == 0 and self.val_loader is not None:
+            # --- Protección para val_loader vacío ---
+            if epoch % self.config.training.val_frequency == 0 and self.val_loader is not None and len(self.val_loader) > 0:
                 # --- Opción 6: Buscar threshold óptimo por época y calcular métricas finales con ese threshold ---
                 thresholds = np.linspace(0.05, 0.95, 19)
                 tps = np.zeros_like(thresholds)
@@ -659,7 +724,6 @@ class Trainer:
                 self.best_threshold = best_t
                 console.print(f"[bold cyan]Threshold óptimo en val: {best_t:.2f} (F1={best_f1_epoch:.4f})[/bold cyan]")
                 # Calcular métricas finales con el threshold óptimo
-                # Recorre de nuevo para calcular métricas completas con el threshold óptimo
                 all_predictions = []
                 all_targets = []
                 for batch in self.val_loader:
@@ -673,10 +737,13 @@ class Trainer:
                             probs = torch.sigmoid(logits)
                         all_predictions.append(probs.cpu())
                         all_targets.append(targets.cpu())
-                all_predictions = torch.cat(all_predictions, dim=0)
-                all_targets = torch.cat(all_targets, dim=0)
-                val_metrics = calculate_metrics(all_predictions, all_targets, threshold=best_t)
-                val_metrics['loss'] = total_loss_val / max(1, n_val)
+                if all_predictions and all_targets:
+                    all_predictions = torch.cat(all_predictions, dim=0)
+                    all_targets = torch.cat(all_targets, dim=0)
+                    val_metrics = calculate_metrics(all_predictions, all_targets, threshold=best_t)
+                    val_metrics['loss'] = total_loss_val / max(1, n_val)
+                else:
+                    val_metrics = {k: train_metrics.get(k, 0.0) for k in train_metrics}
                 self.print_metrics_table(train_metrics, val_metrics, epoch)
                 
                 step = epoch * len(self.train_loader)
@@ -736,6 +803,9 @@ class Trainer:
                     console.print(f"[bold red]Early stopping activado en epoch {epoch+1}")
                     break
             else:
+                # Si no hay val_loader, asigna métricas dummy o copia las de train
+                val_metrics = {k: train_metrics.get(k, 0.0) for k in train_metrics}
+                self.print_metrics_table(train_metrics, val_metrics, epoch)
                 step = epoch * len(self.train_loader)
                 log_metrics(
                     train_metrics,

@@ -45,7 +45,7 @@ logging:
   models_dir: outputs/models
   output_dir: outputs
   predictions_dir: outputs/predictions
-  run_name: simple_classifier_resnet50_20250721_131627
+  run_name: simple_classifier_resnet50_20250721_161645
   tensorboard: true
   wandb: false
   wandb_entity: null
@@ -73,8 +73,8 @@ model:
 seed: 42
 training:
   class_weights:
-  - 1.0082427218519818
-  - 0.9918909592822637
+  - 0.976890756302521
+  - 1.024229074889868
   early_stopping_min_delta: 0.0001
   early_stopping_patience: 10
   epochs: 10

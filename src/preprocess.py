@@ -23,6 +23,8 @@ import shapely
 import sys
 import logging
 import argparse
+from collections import Counter
+import cv2
 
 # Configuración global
 warnings.filterwarnings('ignore', category=rasterio.errors.NotGeoreferencedWarning)
@@ -39,6 +41,12 @@ ACTIVATION_DATES = {
 
 TILE_SIZE = 128
 BUFFER_METERS = 10  # Buffer consistente en metros
+
+# === GLOBAL PERCENTILES ===
+PERCENTILE_SAMPLE_SIZE = 1000
+PERCENTILE_LOW = 2
+PERCENTILE_HIGH = 98
+P = None  # Se calculará al inicio
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
@@ -77,7 +85,21 @@ def get_activation_date(call_dir: Path) -> datetime | None:
     logger.warning(f"No activation date for {call_dir.name}")
     return None
 
-def find_scenes_for_aoi(aoi_geom, training_root):
+def read_gsd(item_json):
+    """Lee el Ground Sample Distance (GSD) del item JSON o lo estima del primer band."""
+    with open(item_json) as f:
+        item = json.load(f)
+    gsd = item['properties'].get('gsd')
+    if gsd is None:
+        # Estimate from the first band
+        calib_dir = item_json.parent / "Optical_Calibration"
+        band_files = list(calib_dir.glob('r-*.tif'))
+        if band_files:
+            with rasterio.open(band_files[0]) as src:
+                gsd = abs(src.transform.a)
+    return gsd
+
+def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_end=None):
     scenes = []
     training_root = Path(training_root)
     for item_json in training_root.glob("*-calibrated/*.json"):
@@ -109,12 +131,22 @@ def find_scenes_for_aoi(aoi_geom, training_root):
                     scene_date = datetime.fromisoformat(scene_date.replace('Z', '+00:00'))
                 except:
                     scene_date = extract_date_from_name(item_json.stem)
+            # Filter by temporal interval
+            if interval_start and interval_end and scene_date:
+                if not (interval_start <= scene_date <= interval_end):
+                    logger.warning(f"Escena {item_json.parent.name} ({scene_date}) fuera del intervalo temporal [{interval_start}, {interval_end}]")
+                    continue
+            # Read GSD
+            gsd = read_gsd(item_json)
+            if gsd:
+                logger.debug(f"GSD para escena {item_json.parent.name}: {gsd} m/px")
             scenes.append({
                 'scene_id': item_json.parent.name,
                 'date': scene_date,
                 'geometry': scene_geom,
                 'path': item_json.parent,
-                'bands': bands
+                'bands': bands,
+                'gsd': gsd
             })
         except Exception as e:
             logger.warning(f"Error procesando {item_json}: {e}")
@@ -152,45 +184,184 @@ def buffer_geom(building, crs):
         buffered = building.buffer(BUFFER_METERS, cap_style=1)
     return buffered
 
+TARGET_GSD = 0.5  # metros por pixel objetivo
+
+def sample_patches_for_percentiles(training_root, sample_size=1000):
+    """Extrae parches aleatorios de todas las bandas y sensores para calcular percentiles globales."""
+    from random import shuffle
+    sample_values = {}
+    scenes = []
+    # Buscar todas las escenas
+    for event_dir in Path(training_root).glob('*'):
+        for item_json in event_dir.glob("*-calibrated/*.json"):
+            try:
+                with open(item_json, 'r') as f:
+                    item = json.load(f)
+                calib_dir = item_json.parent / "Optical_Calibration"
+                if not calib_dir.exists():
+                    continue
+                bands = {}
+                for band_file in calib_dir.glob("r-*.tif"):
+                    band_name = band_file.stem.split('-')[-1]
+                    bands[band_name] = band_file
+                if bands:
+                    scenes.append((bands, calib_dir))
+            except Exception:
+                continue
+    shuffle(scenes)
+    count = 0
+    for bands, calib_dir in scenes:
+        for band_name, band_path in bands.items():
+            try:
+                with rasterio.open(band_path) as src:
+                    # Extraer un parche aleatorio
+                    h, w = src.height, src.width
+                    if h < 64 or w < 64:
+                        continue
+                    y = np.random.randint(0, h-64)
+                    x = np.random.randint(0, w-64)
+                    patch = src.read(1, window=rasterio.windows.Window(x, y, 64, 64))
+                    if band_name not in sample_values:
+                        sample_values[band_name] = []
+                    sample_values[band_name].append(patch.flatten())
+                    count += 1
+                    if count >= sample_size:
+                        break
+            except Exception:
+                continue
+        if count >= sample_size:
+            break
+    # Concatenar y calcular percentiles
+    percentiles = {}
+    for band in sample_values:
+        vals = np.concatenate(sample_values[band])
+        percentiles[band] = np.percentile(vals, [PERCENTILE_LOW, PERCENTILE_HIGH])
+    return percentiles
+
 def process_scene(scene, bbox, target_crs):
+    global P
     if scene is None or not scene["bands"]:
         return None
-
-    # Elegir siempre la MS-red si existe, si no la primera
-    key0 = "red" if "red" in scene["bands"] else next(iter(scene["bands"]))
-    with rasterio.open(scene["bands"][key0]) as src0:
-        if src0.crs != target_crs:
-            tf = Transformer.from_crs(target_crs, src0.crs, always_xy=True).transform
-            minx, miny = tf(bbox[0], bbox[1])
-            maxx, maxy = tf(bbox[2], bbox[3])
-            bbox_t = (minx, miny, maxx, maxy)
-        else:
-            bbox_t = bbox
-        win0 = from_bounds(*bbox_t, transform=src0.transform)
-        if win0.width == 0 or win0.height == 0:
-            return None        # el edificio no cae dentro de la escena
-
+    gsd = scene.get('gsd', TARGET_GSD)
+    if gsd is None or gsd <= 0 or not np.isfinite(gsd):
+        logger.warning(f"GSD inválido ({gsd}) para escena {scene['scene_id']}, usando valor por defecto {TARGET_GSD}")
+        gsd = TARGET_GSD
+    scale = gsd / TARGET_GSD
+    MAX_SCALE = 10.0
+    if not np.isfinite(scale) or scale <= 0:
+        logger.warning(f"Factor de escala inválido ({scale}) para escena {scene['scene_id']}, usando 1.0")
+        scale = 1.0
+    elif scale > MAX_SCALE:
+        scale = MAX_SCALE
+    elif scale < 1/MAX_SCALE:
+        scale = 1/MAX_SCALE
     band_arrays = []
+    band_shapes = []
+    band_names = list(scene["bands"].keys())
+    # Primera pasada: leer todas las bandas y determinar el shape común
     for band_name, band_path in scene["bands"].items():
-        with rasterio.open(band_path) as src:
-            data = src.read(1, window=win0, boundless=True, fill_value=0)
-            if data.size == 0:
-                continue
-            band_arrays.append(
-                resize(data, (TILE_SIZE, TILE_SIZE), order=1, mode="reflect",
-                       preserve_range=True)
-            )
-
+        try:
+            with rasterio.open(band_path) as src:
+                if src.crs != target_crs:
+                    tf = Transformer.from_crs(target_crs, src.crs, always_xy=True).transform
+                    minx, miny = tf(bbox[0], bbox[1])
+                    maxx, maxy = tf(bbox[2], bbox[3])
+                    bbox_t = (minx, miny, maxx, maxy)
+                else:
+                    bbox_t = bbox
+                win = from_bounds(*bbox_t, transform=src.transform)
+                if win.width == 0 or win.height == 0:
+                    continue
+                data = src.read(1, window=win, boundless=True, fill_value=0)
+                if data.size == 0:
+                    continue
+                if not np.isclose(scale, 1.0):
+                    try:
+                        new_size = (int(data.shape[0] * scale), int(data.shape[1] * scale))
+                        if all(s > 0 for s in new_size):
+                            data = resize(
+                                data,
+                                new_size,
+                                order=3,
+                                mode="edge",
+                                preserve_range=True,
+                                anti_aliasing=True,
+                            )
+                        else:
+                            logger.warning(f"Tamaño de rescalado inválido {new_size} para banda {band_name}")
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Error al rescalar banda {band_name}: {e}")
+                        continue
+                band_arrays.append(data)
+                band_shapes.append(data.shape)
+        except Exception as e:
+            logger.warning(f"Error procesando banda {band_name}: {e}")
+            continue
     if not band_arrays:
         return None
-
-    stack = np.stack(band_arrays, axis=-1).astype(np.float32)
-    # Normalización vectorizada
-    mn = stack.min(axis=(0, 1))
-    mx = stack.max(axis=(0, 1))
-    rng = np.maximum(mx - mn, 1e-8)
-    norm = (stack - mn) / rng
-    return (norm.transpose(2, 0, 1) * 65535).round().astype(np.uint16)
+    shape_counts = Counter(band_shapes)
+    target_shape = shape_counts.most_common(1)[0][0]
+    normalized_arrays = []
+    for idx, (data, shape) in enumerate(zip(band_arrays, band_shapes)):
+        if shape != target_shape:
+            try:
+                data = resize(
+                        data,
+                        target_shape,
+                        order=3,
+                        mode="edge",
+                        preserve_range=True,
+                        anti_aliasing=True,
+                )
+            except Exception as e:
+                logger.warning(f"Error normalizando shape de banda {idx}: {e}")
+                continue
+        # Redimensionar al tamaño final del tile
+        try:
+            data = resize(
+                data,
+                (TILE_SIZE, TILE_SIZE),
+                order=3,
+                mode="edge",
+                preserve_range=True,
+                anti_aliasing=True,
+            )
+            normalized_arrays.append(data)
+        except Exception as e:
+            logger.warning(f"Error en resize final de banda {idx}: {e}")
+            continue
+    if not normalized_arrays:
+        return None
+    # === NORMALIZACIÓN POR PERCENTILES ===
+    stack = np.stack(normalized_arrays, axis=-1).astype(np.float32)
+    for i, band_name in enumerate(band_names):
+        if P and band_name in P:
+            p2, p98 = P[band_name]
+            stack[..., i] = np.clip(stack[..., i], p2, p98)
+            stack[..., i] = (stack[..., i] - p2) / max(p98 - p2, 1e-8)
+        else:
+            mn = stack[..., i].min()
+            mx = stack[..., i].max()
+            stack[..., i] = (stack[..., i] - mn) / max(mx - mn, 1e-8)
+    # === PANSHARPENING OPCIONAL ===
+    if 'pan' in band_names and all(b in band_names for b in ['red', 'green', 'blue']):
+        idx_pan = band_names.index('pan')
+        idx_r = band_names.index('red')
+        idx_g = band_names.index('green')
+        idx_b = band_names.index('blue')
+        pan = stack[..., idx_pan]
+        rgb = stack[..., [idx_r, idx_g, idx_b]]
+        pan_f = pan - cv2.GaussianBlur(pan, (5,5), 0)
+        rgb = np.clip(rgb + pan_f[..., None] * 0.2, 0, 1)
+        stack[..., idx_r] = rgb[..., 0]
+        stack[..., idx_g] = rgb[..., 1]
+        stack[..., idx_b] = rgb[..., 2]
+    try:
+        return (stack.transpose(2, 0, 1) * 65535).round().astype(np.uint16)
+    except Exception as e:
+        logger.warning(f"Error en normalización final: {e}")
+        return None
 
 def process_tile_worker(args):
     wkb_geom, scenes, crs_wkt, output_dir, fid, damage = args
@@ -253,10 +424,21 @@ def process_gpkg(gpkg_path, training_root, output_root, split):
     call_dir = training_root / event_name
     activation_date = get_activation_date(call_dir)
     logger.info(f"Fecha de activación: {activation_date}")
-    if not activation_date:
-        logger.warning(f"Fecha de activación desconocida para {event_name}")
-        return []
-    scenes = find_scenes_for_aoi(aoi_geom_wgs, call_dir)
+    # Load temporal interval from collection.json
+    interval_start, interval_end = None, None
+    coll_json = call_dir / "collection.json"
+    if coll_json.exists():
+        with open(coll_json, "r", encoding="utf-8") as f:
+            coll = json.load(f)
+        try:
+            interval = coll['extent']['temporal']['interval'][0]
+            interval_start = datetime.fromisoformat(interval[0].replace('Z', '+00:00'))
+            interval_end = datetime.fromisoformat(interval[1].replace('Z', '+00:00'))
+        except Exception as e:
+            logger.warning(f"Error leyendo intervalo temporal en {coll_json}: {e}")
+    else:
+        logger.warning(f"No se encontró collection.json en {call_dir}")
+    scenes = find_scenes_for_aoi(aoi_geom_wgs, call_dir, interval_start, interval_end)
     logger.info(f"Escenas encontradas: {len(scenes)}")
     if not scenes:
         logger.warning(f"No se encontraron escenas para {gpkg_path}")
@@ -274,22 +456,50 @@ def process_gpkg(gpkg_path, training_root, output_root, split):
             logger.debug(f"FID {fid}: pre_scene y post_scene no encontrada")
             continue
         tasks.append((row.geometry.wkb, (pre_scene, post_scene), crs_wkt, output_dir, fid, damage))
+
+    # Configurar manejador de señales antes del pool
+    original_sigint_handler = signal.getsignal(signal.SIGINT)
+    original_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    executor = None
+
+    def signal_handler(signum, frame):
+        if executor is not None:
+            logger.info("\nCancelando procesos...")
+            executor.shutdown(wait=False, cancel_futures=True)
+        # Restaurar manejadores originales
+        signal.signal(signal.SIGINT, original_sigint_handler)
+        signal.signal(signal.SIGTERM, original_sigterm_handler)
+        sys.exit(1)
+
     try:
+        # Instalar manejador de señales
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
         with ProcessPoolExecutor(max_workers=12) as executor:
-            for meta in tqdm(executor.map(process_tile_worker, tasks, chunksize=128), total=len(tasks), desc=f"Procesando {gpkg_path.name}"):
-                if meta:
-                    meta['gpkg'] = gpkg_path.name
-                    meta['event'] = event_name
-                    meta['split'] = split
-                    meta_data.append(meta)
-    except KeyboardInterrupt:
-        logger.info("Cancelado por el usuario. Terminando workers...")
-        executor.shutdown(wait=False, cancel_futures=True)
-        os._exit(1)
+            try:
+                for meta in tqdm(executor.map(process_tile_worker, tasks, chunksize=128), 
+                               total=len(tasks), 
+                               desc=f"Procesando {gpkg_path.name}"):
+                    if meta:
+                        meta['gpkg'] = gpkg_path.name
+                        meta['event'] = event_name
+                        meta['split'] = split
+                        meta_data.append(meta)
+            except KeyboardInterrupt:
+                logger.info("\nInterrupción detectada. Limpiando...")
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+    finally:
+        # Restaurar manejadores originales
+        signal.signal(signal.SIGINT, original_sigint_handler)
+        signal.signal(signal.SIGTERM, original_sigterm_handler)
+
     logger.info(f"Tiles generados para {gpkg_path}: {len(meta_data)}")
     return meta_data
 
 def main():
+    global P
     parser = argparse.ArgumentParser()
     parser.add_argument('--limit', type=int, default=None, help='Limitar número de GPKGs a procesar')
     parser.add_argument('--loglevel', type=str, default='INFO', help='Nivel de logging (DEBUG, INFO, WARNING)')
@@ -302,6 +512,10 @@ def main():
     training_annotations = data_root / "Training" / "Annotations"
     training_data = data_root / "Training"
     output_root.mkdir(exist_ok=True)
+    # === CALCULAR PERCENTILES GLOBALES ===
+    logger.info("Calculando percentiles globales por banda...")
+    P = sample_patches_for_percentiles(training_data, sample_size=PERCENTILE_SAMPLE_SIZE)
+    logger.info(f"Percentiles globales: {P}")
     gpkg_files = []
     for root, _, files in os.walk(training_annotations):
         for file in files:
@@ -313,8 +527,8 @@ def main():
     if args.limit:
         gpkg_files = gpkg_files[:args.limit]
 
-    #gpkg_files=gpkg_files[12:]
-    
+    #gpkg_files=gpkg_files[:2]
+
     all_meta = []
     for gpkg_path in gpkg_files:
         fname = gpkg_path.name.lower()
