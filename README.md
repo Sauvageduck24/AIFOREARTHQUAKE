@@ -37,6 +37,40 @@ AIFOREARTHQUAKE/
 └── README.md               # Este archivo
 ```
 
+## 📝 Descripción de scripts principales
+
+### `src/preprocess.py`
+- **Función:** Preprocesa los datos crudos, generando tiles (parches) de imágenes pre y post-terremoto y sus máscaras de daño asociadas. Organiza los datos en splits (`full`, `test`, etc.) y guarda metadatos.
+- **Uso típico:**
+  ```bash
+  python src/preprocess.py --raw_data_root data/raw --output_root preprocessed --binary --seed 42
+  ```
+- **Notas:** Permite configurar tamaño de tile, solapamiento, filtrado, y reproducibilidad. Los datos resultantes se usan para entrenamiento y evaluación.
+
+### `src/data_loader.py`
+- **Función:** Carga los datos preprocesados y crea objetos `Dataset` y `DataLoader` de PyTorch, listos para entrenamiento, validación y test. Permite balanceo de clases y augmentations.
+- **Uso típico:**
+  ```bash
+  python src/data_loader.py --data_root preprocessed --mode pre_post --filter_has_data --batch_size 8
+  ```
+- **Notas:** Permite elegir modo de datos (`pre_post`, `pre_only`, `post_only`), filtrar tiles sin datos, y guardar los datasets generados. Imprime información útil sobre los datos cargados.
+
+### `src/train.py`
+- **Función:** Entrena el modelo de segmentación de daño usando los dataloaders generados. Permite configurar arquitectura, hiperparámetros, augmentations, logging, y checkpointing.
+- **Uso típico:**
+  ```bash
+  python src/train.py --config configs/baseline.yaml
+  ```
+- **Notas:** Lee la configuración desde un archivo YAML, entrena el modelo, guarda los mejores pesos y logs de entrenamiento.
+
+### `src/test.py`
+- **Función:** Evalúa el modelo entrenado sobre el split de test, generando métricas y predicciones. Permite cargar modelos y dataloaders guardados.
+- **Uso típico:**
+  ```bash
+  python src/test.py --config configs/baseline.yaml --model_path outputs/models/best_model.pth
+  ```
+- **Notas:** Calcula métricas como IoU, Dice, precisión y recall sobre el conjunto de test.
+
 ## 🚀 Instalación
 
 1. **Clonar el repositorio:**
