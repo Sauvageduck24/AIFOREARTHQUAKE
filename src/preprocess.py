@@ -249,6 +249,7 @@ def process_scene(scene, bbox, target_crs):
     scale = gsd / TARGET_GSD
     MAX_SCALE = 10.0
     if not np.isfinite(scale) or scale <= 0:
+        logger.warning(f"Factor de escala inválido ({scale}) para escena {scene['scene_id']}, usando 1.0")
         scale = 1.0
     elif scale > MAX_SCALE:
         scale = MAX_SCALE
@@ -343,21 +344,32 @@ def process_scene(scene, bbox, target_crs):
             mn = stack[..., i].min()
             mx = stack[..., i].max()
             stack[..., i] = (stack[..., i] - mn) / max(mx - mn, 1e-8)
-    # === PANSHARPENING OPCIONAL ===
-    if 'pan' in band_names and all(b in band_names for b in ['red', 'green', 'blue']):
-        idx_pan = band_names.index('pan')
-        idx_r = band_names.index('red')
-        idx_g = band_names.index('green')
-        idx_b = band_names.index('blue')
-        pan = stack[..., idx_pan]
-        rgb = stack[..., [idx_r, idx_g, idx_b]]
-        pan_f = pan - cv2.GaussianBlur(pan, (5,5), 0)
-        rgb = np.clip(rgb + pan_f[..., None] * 0.2, 0, 1)
-        stack[..., idx_r] = rgb[..., 0]
-        stack[..., idx_g] = rgb[..., 1]
-        stack[..., idx_b] = rgb[..., 2]
+
+    # --- REORDENAR A RGB SI EXISTEN ---
+    desired_order = ['red', 'green', 'blue']
+    ordered_arrays = []
+    for band in desired_order:
+        if band in band_names:
+            idx = band_names.index(band)
+            ordered_arrays.append(stack[..., idx])
+        else:
+            # Si falta la banda, rellena con ceros
+            ordered_arrays.append(np.zeros_like(stack[..., 0]))
+    # Si hay menos de 3 bandas, rellena hasta 3
+    while len(ordered_arrays) < 3:
+        ordered_arrays.append(np.zeros_like(stack[..., 0]))
+    stack_rgb = np.stack(ordered_arrays, axis=-1)
+
+    # Si quieres mantener las demás bandas, puedes concatenarlas después de RGB
+    extra_bands = [i for i, b in enumerate(band_names) if b not in desired_order]
+    if extra_bands:
+        stack_extra = stack[..., extra_bands]
+        stack_final = np.concatenate([stack_rgb, stack_extra], axis=-1)
+    else:
+        stack_final = stack_rgb
+
     try:
-        return (stack.transpose(2, 0, 1) * 65535).round().astype(np.uint16)
+        return (stack_final.transpose(2, 0, 1) * 65535).round().astype(np.uint16)
     except Exception as e:
         logger.warning(f"Error en normalización final: {e}")
         return None
@@ -526,7 +538,7 @@ def main():
     if args.limit:
         gpkg_files = gpkg_files[:args.limit]
 
-    #gpkg_files=gpkg_files[:2]
+    gpkg_files=gpkg_files[:2]
 
     all_meta = []
     for gpkg_path in gpkg_files:

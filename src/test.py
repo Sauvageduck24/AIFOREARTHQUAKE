@@ -10,16 +10,16 @@ from pathlib import Path
 from model import get_model
 from config import Config
 from utils import setup_logging
-from data_loader import EarthquakeTileDataset, custom_collate
+from data_loader import EarthquakeTileDataset, custom_collate, get_dataloaders
 from transforms import get_val_test_transforms
 from tqdm import tqdm
 
 # --- Argumentos ---
 def parse_args():
     parser = argparse.ArgumentParser(description="Generar predicciones para submission de la competición.")
-    parser.add_argument('--model_path', type=str, default='outputs/models/checkpoint_epoch_10.pth', help='Ruta al modelo .pth')
+    parser.add_argument('--model_path', type=str, default='outputs/models/checkpoint_epoch_2.pth', help='Ruta al modelo .pth')
     parser.add_argument('--input_dir', type=str, default='submissions/submission_1', help='Carpeta con archivos .gpkg a predecir')
-    parser.add_argument('--output_dir', type=str, default='submissions/submission_3', help='Carpeta donde guardar la submission')
+    parser.add_argument('--output_dir', type=str, default='submissions/submission_4', help='Carpeta donde guardar la submission')
     parser.add_argument('--config', type=str, default='config.yaml', help='Archivo de configuración')
     parser.add_argument('--device', type=str, default='cuda', help='cpu o cuda')
     parser.add_argument('--split', type=str, default='test', help='Split de preprocesado a usar (test o full)')
@@ -63,23 +63,13 @@ def main():
         threshold = args.threshold if args.threshold is not None else 0.5
     max_channels = getattr(config.data, 'max_channels', 3)
     # Dataset de test
-    data_root = getattr(config.data, 'data_root', 'preprocessed')
-    test_dataset = EarthquakeTileDataset(
-        data_root=data_root,
-        split=args.split,
-        mode=getattr(config.data, 'mode', 'post_only'),
-        filter_has_data=getattr(config.data, 'filter_has_data', True),
-        max_channels=max_channels
-    )
-    # DataLoader para test
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        collate_fn=custom_collate
-    )
+    # Usar get_dataloaders para obtener el test_loader con los mismos parámetros que en train
+    config.data.batch_size = args.batch_size
+    config.data.num_workers = args.num_workers
+    config.data.split = args.split
+    train_loader, val_loader, test_loader = get_dataloaders(config)
+    if test_loader is None:
+        raise RuntimeError('No se pudo crear el test_loader con get_dataloaders')
     # Cargar modelo
     model = get_model(config.model)
     model = load_checkpoint_to_model(model, args.model_path, device)

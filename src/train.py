@@ -696,6 +696,8 @@ class Trainer:
                 fns = np.zeros_like(thresholds)
                 total_loss_val = 0.0
                 n_val = 0
+                all_predictions = []
+                all_tgts = []
                 for batch in self.val_loader:
                     images = batch['image'].to(self.device)
                     targets = batch['damaged'].to(self.device)
@@ -705,6 +707,8 @@ class Trainer:
                             probs = torch.softmax(logits, dim=1)[:, 1]
                         else:
                             probs = torch.sigmoid(logits)
+                        all_predictions.append(logits.detach().cpu())  # Guardar logits, no probs
+                        all_tgts.append(targets.cpu())
                         for i, t in enumerate(thresholds):
                             preds_bin = (probs > t).float()
                             tps[i] += ((preds_bin == 1) & (targets == 1)).sum().item()
@@ -723,24 +727,11 @@ class Trainer:
                         best_t = t
                 self.best_threshold = best_t
                 console.print(f"[bold cyan]Threshold óptimo en val: {best_t:.2f} (F1={best_f1_epoch:.4f})[/bold cyan]")
-                # Calcular métricas finales con el threshold óptimo
-                all_predictions = []
-                all_targets = []
-                for batch in self.val_loader:
-                    images = batch['image'].to(self.device)
-                    targets = batch['damaged'].to(self.device)
-                    with torch.no_grad():
-                        logits = self.model(images)
-                        if logits.ndim == 2 and logits.shape[1] == 2:
-                            probs = torch.softmax(logits, dim=1)[:, 1]
-                        else:
-                            probs = torch.sigmoid(logits)
-                        all_predictions.append(probs.cpu())
-                        all_targets.append(targets.cpu())
-                if all_predictions and all_targets:
-                    all_predictions = torch.cat(all_predictions, dim=0)
-                    all_targets = torch.cat(all_targets, dim=0)
-                    val_metrics = calculate_metrics(all_predictions, all_targets, threshold=best_t)
+                # Calcular métricas finales con el threshold óptimo usando los arrays guardados
+                if all_predictions and all_tgts:
+                    all_predictions_cat = torch.cat(all_predictions, dim=0)
+                    all_targets_cat = torch.cat(all_tgts, dim=0)
+                    val_metrics = calculate_metrics(all_predictions_cat, all_targets_cat, threshold=best_t)
                     val_metrics['loss'] = total_loss_val / max(1, n_val)
                 else:
                     val_metrics = {k: train_metrics.get(k, 0.0) for k in train_metrics}
@@ -829,6 +820,8 @@ class Trainer:
             )
         
         # Guardar el threshold óptimo en el config y en outputs/config.yaml
+        import os
+        os.makedirs('outputs', exist_ok=True)
         self.config.training.threshold = self.best_threshold
         self.config.save('outputs/config.yaml')
         
@@ -897,7 +890,7 @@ def main():
     parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML", default="config.yaml")
     parser.add_argument("--resume", type=str, help="Ruta al checkpoint para resumir")
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
-    parser.add_argument("--epochs", type=int, help="Número de épocas", default=10)
+    parser.add_argument("--epochs", type=int, help="Número de épocas", default=2)
     parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
     parser.add_argument("--lr", default=1e-2, type=float, help="Learning rate")
     parser.add_argument("--model", type=str, help="Nombre del modelo", default='cnn_classifier')
