@@ -57,8 +57,10 @@ def main():
     config.model.model_name = 'cnn_classifier'  # Forzar el modelo correcto para el checkpoint
     config.hardware.device = args.device
     device = torch.device(args.device)
-    # Override threshold si se pasa por argumento
-    threshold = args.threshold if args.threshold is not None else getattr(config.training, 'threshold', 0.5)
+    # Usar threshold óptimo guardado en config si existe
+    threshold = getattr(config.training, 'threshold', None)
+    if threshold is None:
+        threshold = args.threshold if args.threshold is not None else 0.5
     max_channels = getattr(config.data, 'max_channels', 3)
     # Dataset de test
     data_root = getattr(config.data, 'data_root', 'preprocessed')

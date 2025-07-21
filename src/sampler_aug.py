@@ -29,8 +29,8 @@ def build_transforms(minority_class):
                            scale_limit=0.15,
                            rotate_limit=45, p=0.5),
         A.RandomBrightnessContrast(0.2, 0.2, p=0.5),
-        A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
-        A.GridDistortion(p=0.2),
+        # A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
+        # A.GridDistortion(p=0.2),
         ToTensorV2(),
     ])
     weak_aug = A.Compose([

@@ -689,7 +689,7 @@ class Trainer:
             
             # --- Protección para val_loader vacío ---
             if epoch % self.config.training.val_frequency == 0 and self.val_loader is not None and len(self.val_loader) > 0:
-                # --- Opción 6: Buscar threshold óptimo por época y calcular métricas finales con ese threshold ---
+                self.model.eval()  # ➜ desactiva Dropout y pone BN en modo eval
                 thresholds = np.linspace(0.05, 0.95, 19)
                 tps = np.zeros_like(thresholds)
                 fps = np.zeros_like(thresholds)
@@ -776,6 +776,7 @@ class Trainer:
                     self.best_val_metrics = val_metrics.copy()
                     # Guardar checkpoint en disco con nombre fijo best.pth
                     checkpoint_path = f"{self.config.logging.models_dir}/best.pth"
+                    Path(self.config.logging.models_dir).mkdir(parents=True, exist_ok=True)
                     save_checkpoint(
                         self.model,
                         self.optimizer,
@@ -826,6 +827,10 @@ class Trainer:
                 train_metrics,
                 val_metrics if 'val_metrics' in locals() else train_metrics
             )
+        
+        # Guardar el threshold óptimo en el config y en outputs/config.yaml
+        self.config.training.threshold = self.best_threshold
+        self.config.save('outputs/config.yaml')
         
         console.rule("[bold green]Entrenamiento completado")
         console.print(f"[bold green]Mejor F1: {best_f1:.4f} en epoch {best_epoch}")
@@ -894,7 +899,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
     parser.add_argument("--epochs", type=int, help="Número de épocas", default=10)
     parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
-    parser.add_argument("--lr", default=0.001, type=float, help="Learning rate")
+    parser.add_argument("--lr", default=1e-2, type=float, help="Learning rate")
     parser.add_argument("--model", type=str, help="Nombre del modelo", default='cnn_classifier')
     # Cambiar optimizador y scheduler por defecto
     parser.add_argument("--optimizer", type=str, default="adamw", help="Optimizador (adam, adamw, sgd)")

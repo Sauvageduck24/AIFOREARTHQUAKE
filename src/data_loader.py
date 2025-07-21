@@ -251,35 +251,16 @@ def get_dataloaders_aug(config):
         max_channels=max_channels
     )
     meta_df = dataset_full.meta_df.copy()
-    # --- Split por evento (no aleatorio por tile) ---
-    events = meta_df['event'].unique()
-    if len(events) < 2:
-        # No se puede hacer split, usar todo para entrenamiento
-        train_events = events
-        val_events = []
-        warnings.warn("No se puede estratificar por evento (menos de 2 eventos). Usando todo para entrenamiento.")
-    else:
-        # Estratificar por proporción de dañados por evento
-        event_labels = meta_df.groupby('event')['damaged'].mean().values
-        stratify_labels = (event_labels > 0.5).astype(int)
-        bincount = np.bincount(stratify_labels)
-        if np.any(bincount < 2):
-            print("[WARNING] No se puede estratificar por evento (al menos una clase tiene <2 eventos). Haciendo split aleatorio por evento.")
-            train_events, val_events = train_test_split(
-                events,
-                test_size=1-split_ratio,
-                random_state=seed,
-                shuffle=True
-            )
-        else:
-            train_events, val_events = train_test_split(
-                events,
-                test_size=1-split_ratio,
-                random_state=seed,
-                stratify=stratify_labels
-            )
-    meta_train = meta_df[meta_df['event'].isin(train_events)].reset_index(drop=True)
-    meta_val = meta_df[meta_df['event'].isin(val_events)].reset_index(drop=True)
+    # --- Split estratificado por clase (no por evento) ---
+    indices = np.arange(len(meta_df))
+    train_idx, val_idx = train_test_split(
+        indices,
+        test_size=1-split_ratio,
+        random_state=seed,
+        stratify=meta_df['damaged']
+    )
+    meta_train = meta_df.iloc[train_idx].reset_index(drop=True)
+    meta_val = meta_df.iloc[val_idx].reset_index(drop=True)
     # Crear datasets para train y val
     dataset_train = SubsetEarthquakeTileDataset(
         data_root=data_root,
@@ -369,27 +350,16 @@ def get_dataloaders(config):
         max_channels=max_channels
     )
     meta_df = dataset_full.meta_df.copy()
-    events = meta_df['event'].unique()
-    event_labels = meta_df.groupby('event')['damaged'].mean().values
-    stratify_labels = (event_labels > 0.5).astype(int)
-    bincount = np.bincount(stratify_labels)
-    if np.any(bincount < 2):
-        print("[WARNING] No se puede estratificar por evento (al menos una clase tiene <2 eventos). Haciendo split aleatorio por evento.")
-        train_events, val_events = train_test_split(
-            events,
-            test_size=1-split_ratio,
-            random_state=seed,
-            shuffle=True
-        )
-    else:
-        train_events, val_events = train_test_split(
-            events,
-            test_size=1-split_ratio,
-            random_state=seed,
-            stratify=stratify_labels
-        )
-    meta_train = meta_df[meta_df['event'].isin(train_events)].reset_index(drop=True)
-    meta_val = meta_df[meta_df['event'].isin(val_events)].reset_index(drop=True)
+    # --- Split estratificado por clase (no por evento) ---
+    indices = np.arange(len(meta_df))
+    train_idx, val_idx = train_test_split(
+        indices,
+        test_size=1-split_ratio,
+        random_state=seed,
+        stratify=meta_df['damaged']
+    )
+    meta_train = meta_df.iloc[train_idx].reset_index(drop=True)
+    meta_val = meta_df.iloc[val_idx].reset_index(drop=True)
     dataset_train = SubsetEarthquakeTileDataset(
         data_root=data_root,
         split=split,

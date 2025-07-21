@@ -249,7 +249,6 @@ def process_scene(scene, bbox, target_crs):
     scale = gsd / TARGET_GSD
     MAX_SCALE = 10.0
     if not np.isfinite(scale) or scale <= 0:
-        logger.warning(f"Factor de escala inválido ({scale}) para escena {scene['scene_id']}, usando 1.0")
         scale = 1.0
     elif scale > MAX_SCALE:
         scale = MAX_SCALE
