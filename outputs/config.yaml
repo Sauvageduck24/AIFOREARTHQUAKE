@@ -41,14 +41,14 @@ model:
   tile_size: 128
   n_targets: 1
 training:
-  epochs: 2
-  learning_rate: 0.01
+  epochs: 20
+  learning_rate: 0.001
   weight_decay: 0.0
   optimizer: adamw
   scheduler: cosine
   scheduler_patience: 5
   scheduler_factor: 0.5
-  warmup_epochs: 5
+  warmup_epochs: 2
   loss_function: bce_dice
   class_weights:
   - 1.0136687797147386
@@ -73,7 +73,7 @@ hardware:
   max_grad_norm: 1.0
 logging:
   experiment_name: earthquake_damage_detection
-  run_name: simple_classifier_resnet50_20250721_214730
+  run_name: simple_classifier_resnet50_20250721_225020
   log_dir: outputs/logs
   tensorboard: true
   wandb: false

@@ -738,23 +738,11 @@ class Trainer:
                     best_f1 = val_metrics['f1_score']
                     self.best_metric = best_f1
                     best_epoch = epoch+1
-                    console.print(f"[bold yellow]Nuevo mejor modelo (F1={best_f1:.4f}) guardado en disco en epoch {best_epoch}")
                     self.best_model_state = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in self.model.state_dict().items()}
                     self.best_optimizer_state = self.optimizer.state_dict()
                     self.best_epoch = epoch
                     self.best_train_metrics = train_metrics.copy()
                     self.best_val_metrics = val_metrics.copy()
-                    # Guardar checkpoint en disco con nombre fijo best.pth
-                    checkpoint_path = f"{self.config.logging.models_dir}/best.pth"
-                    Path(self.config.logging.models_dir).mkdir(parents=True, exist_ok=True)
-                    save_checkpoint(
-                        self.model,
-                        self.optimizer,
-                        epoch,
-                        {**train_metrics, **val_metrics},
-                        checkpoint_path,
-                        is_best=True
-                    )
                 # --- Opción 7: Actualizar SWA si corresponde ---
                 if self.swa_model is not None and epoch >= self.swa_start_epoch:
                     self.swa_model.update_parameters(self.model)
@@ -790,12 +778,20 @@ class Trainer:
         
         # Ya no se guarda el mejor modelo aquí, solo el "last" si corresponde
         
-        # Guardar modelo final si corresponde
-        if self.config.training.save_last:
-            self.save_checkpoint(
-                self.config.training.epochs - 1,
-                train_metrics,
-                val_metrics if 'val_metrics' in locals() else train_metrics
+        # Guardar el mejor modelo al final del entrenamiento
+        if self.best_model_state is not None:
+            checkpoint_path = f"{self.config.logging.models_dir}/best.pth"
+            Path(self.config.logging.models_dir).mkdir(parents=True, exist_ok=True)
+            # Cargar el mejor estado en el modelo antes de guardar
+            self.model.load_state_dict(self.best_model_state)
+            self.optimizer.load_state_dict(self.best_optimizer_state)
+            save_checkpoint(
+                self.model,
+                self.optimizer,
+                self.best_epoch,
+                {**self.best_train_metrics, **self.best_val_metrics},
+                checkpoint_path,
+                is_best=True
             )
         
         # Guardar el threshold óptimo en el config y en outputs/config.yaml
@@ -872,9 +868,9 @@ def main():
     parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML", default="config.yaml")
     parser.add_argument("--resume", type=str, help="Ruta al checkpoint para resumir")
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
-    parser.add_argument("--epochs", type=int, help="Número de épocas", default=2)
+    parser.add_argument("--epochs", type=int, help="Número de épocas", default=20)
     parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
-    parser.add_argument("--lr", default=1e-2, type=float, help="Learning rate")
+    parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate")
     parser.add_argument("--model", type=str, help="Nombre del modelo", default='siamese_cnn_classifier')
     # Cambiar optimizador y scheduler por defecto
     parser.add_argument("--optimizer", type=str, default="adamw", help="Optimizador (adam, adamw, sgd)")
@@ -888,7 +884,7 @@ def main():
     # NUEVO: Argumentos para tipo de loss y threshold
     parser.add_argument("--loss_type", type=str, default="bce_dice", choices=["bce", "dice", "bce_dice", "focal"], help="Tipo de función de pérdida")
     parser.add_argument("--threshold", type=float, default=0.5, help="Umbral para binarización de clase positiva")
-    parser.add_argument("--warmup_epochs", type=int, default=5, help="Épocas de warmup para el scheduler")
+    parser.add_argument("--warmup_epochs", type=int, default=2, help="Épocas de warmup para el scheduler")
     parser.add_argument("--scheduler_t0", type=int, default=10, help="T_0 para CosineAnnealingWarmRestarts")
     parser.add_argument("--use_aug", action="store_true",default=True, help="Usar data augmentation y muestreo balanceado (get_dataloaders_aug)")
     parser.add_argument("--label_smoothing", type=float, default=0.05, help="Label smoothing binario (0.0 = sin smoothing, típico 0.05)")
