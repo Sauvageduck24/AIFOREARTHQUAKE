@@ -4,16 +4,7 @@ Módulo de entrenamiento para el proyecto AI for Earthquake Response.
 Este módulo implementa el ciclo completo de entrenamiento y validación
 para modelos de detección de daños por terremotos.
 
-Ahora soporta cualquier modelo de PyTorch, incluyendo modelos simples como nn.Linear:
-
-Ejemplo de uso con modelo lineal:
-  - En config.yaml:
-      model:
-        model_name: "linear"
-        in_features: 8  # canales*H*W si imagen completa
-        out_features: 1 # binario
-  - O por línea de comandos:
-      python src/train.py --model linear
+Adaptado para trabajar con el nuevo data_loader.py que maneja datos pre/post evento.
 """
 
 import os
@@ -26,7 +17,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from loguru import logger
@@ -35,50 +26,127 @@ from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from rich import box
+import numpy as np
+from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 
 console = Console()
 
 from config import Config, get_default_config
-# from data_loader import PreprocessedTileDataset  # Eliminado porque no existe ni se usa
+from data_loader import EarthquakeTileDataset, SubsetEarthquakeTileDataset, custom_collate
 from model import get_model
 from utils import (
     set_seed, setup_logging, calculate_metrics, calculate_loss,
     save_checkpoint, load_checkpoint, log_metrics, setup_wandb,
     visualize_predictions, plot_metrics_history
 )
+# Usar get_dataloaders_aug para entrenamiento con augmentation
+from data_loader import get_dataloaders_aug
 
 
-def get_preprocessed_dataloaders(config):
+def get_dataloaders(config):
     """
-    Crea DataLoaders usando PreprocessedTileDataset para los splits disponibles.
+    Crea o carga DataLoaders usando el nuevo EarthquakeTileDataset.
     """
-    from torch.utils.data import DataLoader
-    data_root = config.data.processed_data_path if hasattr(config.data, 'processed_data_path') else 'data/preprocessed'
-    batch_size = config.data.batch_size
-    num_workers = config.data.num_workers
-    pin_memory = config.data.pin_memory
-    splits = ['full', 'val', 'test']
-    loaders = {}
-    for split in splits:
-        try:
-            dataset = PreprocessedTileDataset(data_root=data_root, split=split, transform=None)
-            loader = DataLoader(dataset, batch_size=batch_size, shuffle=(split=='full'), num_workers=num_workers, pin_memory=pin_memory)
-            loaders[split] = loader
-        except Exception as e:
-            loaders[split] = None
-    train_loader = loaders.get('full', None)
-    val_loader = loaders.get('val', None)
-    test_loader = loaders.get('test', None)
-    return train_loader, val_loader, test_loader
+    import torch
+    import os
+    # Permitir cargar DataLoader serializados (PyTorch >=2.6)
+    if hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([torch.utils.data.dataloader.DataLoader])
+    # Construir sufijo igual que en data_loader.py
+    data_root = getattr(config.data, 'data_root', 'preprocessed')
+    split = getattr(config.data, 'split', 'full')
+    mode = getattr(config.data, 'mode', 'post_only')
+    suffix = f"{split}_{mode}"
+    if getattr(config.data, 'small_dataset', False):
+        small_percentage = getattr(config.data, 'small_percentage', 0.2)
+        suffix += f"_small{small_percentage:.0%}"
+    dataloader_dir = "outputs/dataloaders"
+    train_path = os.path.join(dataloader_dir, f"dataloader_train_{suffix}.pt")
+    val_path = os.path.join(dataloader_dir, f"dataloader_val_{suffix}.pt")
+    test_path = os.path.join(dataloader_dir, f"dataloader_test_{suffix}.pt")
+
+    if os.path.exists(train_path) and os.path.exists(val_path):
+        print(f"[INFO] Cargando dataloaders desde {dataloader_dir} (sufijo: {suffix})")
+        train_loader = torch.load(train_path, map_location='cpu')
+        val_loader = torch.load(val_path, map_location='cpu')
+        test_loader = torch.load(test_path, map_location='cpu') if os.path.exists(test_path) else None
+        print(f"[INFO] Train batches: {len(train_loader)} | Val batches: {len(val_loader)}" + (f" | Test batches: {len(test_loader)}" if test_loader else ""))
+        return train_loader, val_loader, test_loader
+    else:
+        print(f"[INFO] Dataloaders no encontrados en disco, creándolos desde cero... (sufijo: {suffix})")
+        # Parámetros del dataset
+        filter_has_data = getattr(config.data, 'filter_has_data', True)
+        max_channels = getattr(config.data, 'max_channels', None)
+        batch_size = config.data.batch_size
+        num_workers = config.data.num_workers
+        pin_memory = getattr(config.data, 'pin_memory', True)
+        # Cargar dataset completo
+        dataset_full = EarthquakeTileDataset(
+            data_root=data_root,
+            split=split,
+            mode=mode,
+            filter_has_data=filter_has_data,
+            max_channels=max_channels
+        )
+        # Crear splits train/val
+        import numpy as np
+        np.random.seed(config.seed)
+        indices = np.arange(len(dataset_full))
+        np.random.shuffle(indices)
+        split_ratio = getattr(config.data, 'split_ratio', 0.8)
+        n_train = int(len(indices) * split_ratio)
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:]
+        # Crear metadatos para cada split
+        meta_train = dataset_full.meta_df.iloc[train_indices].reset_index(drop=True)
+        meta_val = dataset_full.meta_df.iloc[val_indices].reset_index(drop=True)
+        # Crear datasets para train y val
+        dataset_train = SubsetEarthquakeTileDataset(
+            data_root=data_root,
+            split=split,
+            mode=mode,
+            filter_has_data=filter_has_data,
+            max_channels=max_channels,
+            meta_subset=meta_train
+        )
+        dataset_val = SubsetEarthquakeTileDataset(
+            data_root=data_root,
+            split=split,
+            mode=mode,
+            filter_has_data=filter_has_data,
+            max_channels=max_channels,
+            meta_subset=meta_val
+        )
+        # Crear dataloaders
+        train_loader = torch.utils.data.DataLoader(
+            dataset_train,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=custom_collate
+        )
+        val_loader = torch.utils.data.DataLoader(
+            dataset_val,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=custom_collate
+        )
+        print(f"[INFO] Datasets cargados: Train: {len(dataset_train)} tiles | Val: {len(dataset_val)} tiles")
+        print(f"[INFO] Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
+        return train_loader, val_loader, None
 
 class Trainer:
     """
     Clase principal para el entrenamiento de modelos.
     
     Maneja el ciclo completo de entrenamiento, validación y logging.
+    Adaptado para el nuevo sistema de datos pre/post evento.
     """
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, use_aug: bool = False):
         """
         Inicializar el trainer.
         
@@ -86,6 +154,7 @@ class Trainer:
             config: Configuración del experimento
         """
         self.config = config
+        self.use_aug = use_aug
         self.device = torch.device(config.hardware.device)
         
         # Configurar semilla
@@ -133,28 +202,43 @@ class Trainer:
         self.best_metric = 0.0
         self.patience_counter = 0
         
-        self.mode = getattr(config.data, 'mode', 'basic') if hasattr(config, 'data') else 'basic'
-        logger.info("Trainer inicializado")
         # Variables para guardar el mejor modelo en memoria
         self.best_model_state = None
         self.best_optimizer_state = None
         self.best_epoch = 0
         self.best_train_metrics = None
         self.best_val_metrics = None
+        # --- Opción 6: threshold óptimo por época ---
+        self.best_threshold = 0.5
+        # --- Opción 7: SWA ---
+        self.swa_model = None
+        self.swa_start_epoch = getattr(config.training, 'swa_start_epoch', None)
+        self.swa_active = False
+        logger.info("Trainer inicializado")
     
     def setup_data(self):
-        """Cargar DataLoader de train y val desde disco."""
-        mode = getattr(self.config.data, 'mode', 'basic') if hasattr(self.config, 'data') else 'basic'
-        train_path = f"data/dataloaders/dataloader_train_{mode}.pt"
-        val_path = f"data/dataloaders/dataloader_val_{mode}.pt"
-        if not os.path.exists(train_path):
-            raise FileNotFoundError(f"No se encontró el dataloader de train en {train_path}. Ejecuta src/data_loader.py primero.")
-        if not os.path.exists(val_path):
-            raise FileNotFoundError(f"No se encontró el dataloader de val en {val_path}. Ejecuta src/data_loader.py primero.")
-        self.train_loader = torch.load(train_path)
-        self.val_loader = torch.load(val_path)
-        print(f"[INFO] DataLoader de train cargado desde {train_path} ({len(self.train_loader)} batches)")
-        print(f"[INFO] DataLoader de val cargado desde {val_path} ({len(self.val_loader)} batches)")
+        """Cargar DataLoaders con o sin augmentation según el flag use_aug."""
+        if self.use_aug:
+            print("[INFO] Usando data augmentation y muestreo balanceado (get_dataloaders_aug)")
+            self.train_loader, self.val_loader, self.test_loader = get_dataloaders_aug(self.config)
+        else:
+            print("[INFO] Entrenando SIN data augmentation (get_dataloaders clásico)")
+            from data_loader import get_dataloaders
+            self.train_loader, self.val_loader, self.test_loader = get_dataloaders(self.config)
+        # Calcular class_weights automáticamente
+        total = 0
+        damaged = 0
+        for batch in self.train_loader:
+            damaged += batch['damaged'].sum().item()
+            total += batch['damaged'].numel()
+        if damaged > 0 and total > damaged:
+            # Peso para clase 0 (no dañado) y 1 (dañado)
+            w0 = total / (2 * (total - damaged))
+            w1 = total / (2 * damaged)
+            self.config.training.class_weights = [w0, w1]
+        else:
+            self.config.training.class_weights = None
+    
     def setup_model(self):
         """Configurar modelo, optimizador y scheduler."""
         logger.info("Configurando modelo...")
@@ -186,18 +270,27 @@ class Trainer:
         else:
             raise ValueError(f"Optimizador {self.config.training.optimizer} no soportado")
         
-        # Configurar scheduler
+        # --- Scheduler con warm-up + CosineAnnealingWarmRestarts ---
         if self.config.training.scheduler == "cosine":
-            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.config.training.epochs
-            )
+            from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LambdaLR
+            warmup_epochs = getattr(self.config.training, 'warmup_epochs', 5)
+            t_0 = getattr(self.config.training, 'scheduler_t0', 10)
+            total_epochs = self.config.training.epochs
+            def warmup_lambda(epoch):
+                if epoch < warmup_epochs:
+                    return float(epoch + 1) / float(max(1, warmup_epochs))
+                return 1.0
+            self.warmup_scheduler = LambdaLR(self.optimizer, lr_lambda=warmup_lambda)
+            self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=t_0)
+            self.use_warmup = True
+            self._current_epoch = 0
         elif self.config.training.scheduler == "step":
             self.scheduler = optim.lr_scheduler.StepLR(
                 self.optimizer,
                 step_size=30,
                 gamma=0.1
             )
+            self.use_warmup = False
         elif self.config.training.scheduler == "plateau":
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer,
@@ -206,10 +299,13 @@ class Trainer:
                 patience=self.config.training.scheduler_patience,
                 verbose=True
             )
+            self.use_warmup = False
+        else:
+            self.use_warmup = False
         
         # Configurar mixed precision
         if self.config.hardware.use_amp:
-            self.scaler = GradScaler()
+            self.scaler = GradScaler(device='cuda')
         
         logger.info(f"Modelo configurado: {self.config.model.model_name}")
         logger.info(f"Optimizador: {self.config.training.optimizer}")
@@ -233,11 +329,13 @@ class Trainer:
             logger.info(f"Entrenamiento distribuido configurado (rank {self.config.hardware.rank})")
     
     def train_epoch(self, epoch: int) -> Dict[str, float]:
+        """Entrenar una época."""
         self.model.train()
         total_loss = 0.0
         all_predictions = []
         all_targets = []
-        n_targets = getattr(self.config.model, 'n_targets', 512)  # valor por defecto
+        threshold = getattr(self.config.training, 'threshold', 0.5)
+        label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
         with Progress(
             SpinnerColumn(),
             "[progress.description]{task.description}",
@@ -249,20 +347,12 @@ class Trainer:
         ) as progress:
             task = progress.add_task(f"[cyan]Entrenando (Epoch {epoch+1})", total=len(self.train_loader))
             for batch_idx, batch in enumerate(self.train_loader):
-                images = batch['image']
-                labels = batch['labels']
-                images = torch.stack(images).to(self.device)
-                padded_labels = []
-                for l in labels:
-                    l = l.clone()
-                    if l.numel() < n_targets:
-                        l = torch.cat([l, torch.full((n_targets - l.numel(),), -1, dtype=l.dtype)])
-                    padded_labels.append(l[:n_targets])
-                targets = torch.stack(padded_labels).to(self.device).float()  # [B, n_targets]
-                logits = self.model(images)  # [B, n_targets]
-                mask_valid = (targets != -1)
-                loss = calculate_loss(logits[mask_valid], targets[mask_valid], self.config.training.loss_function, self.config.training.class_weights)
+                images = batch['image'].to(self.device)
+                targets = batch['damaged'].to(self.device)
                 if self.config.hardware.use_amp:
+                    with autocast(device_type='cuda'):
+                        logits = self.model(images)
+                        loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
                     self.scaler.scale(loss).backward()
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
                         self.scaler.unscale_(self.optimizer)
@@ -271,28 +361,38 @@ class Trainer:
                         self.scaler.update()
                         self.optimizer.zero_grad()
                 else:
+                    logits = self.model(images)
+                    loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
                     loss.backward()
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.hardware.max_grad_norm)
                         self.optimizer.step()
                         self.optimizer.zero_grad()
                 total_loss += loss.item()
-                all_predictions.append(logits[mask_valid].detach().cpu())
-                all_targets.append(targets[mask_valid].detach().cpu())
-                progress.update(task, advance=1, description=f"[cyan]Entrenando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
+                if logits.ndim == 2 and logits.shape[1] == 2:
+                    probs = torch.softmax(logits.detach().cpu(), dim=1)[:, 1]
+                else:
+                    probs = torch.sigmoid(logits.detach().cpu())
+                all_predictions.append(probs.view(-1))
+                all_targets.append(targets.detach().cpu().view(-1))
+                if batch_idx % 10 == 0 or batch_idx == len(self.train_loader) - 1:
+                    progress.update(task, advance=1, description=f"[cyan]Entrenando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
+                else:
+                    progress.update(task, advance=1)
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        metrics = calculate_metrics(all_predictions, all_targets)
+        metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
         metrics['loss'] = total_loss / len(self.train_loader)
         return metrics
 
     def validate_epoch(self, epoch: int) -> Dict[str, float]:
+        """Validar una época."""
         self.model.eval()
         total_loss = 0.0
         all_predictions = []
         all_targets = []
-        all_images = []
-        n_targets = getattr(self.config.model, 'n_targets', 512)
+        threshold = getattr(self.config.training, 'threshold', 0.5)
+        label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
         with torch.no_grad():
             with Progress(
                 SpinnerColumn(),
@@ -305,34 +405,46 @@ class Trainer:
             ) as progress:
                 task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=len(self.val_loader))
                 for batch_idx, batch in enumerate(self.val_loader):
-                    images = batch['image']
-                    labels = batch['labels']
-                    images = torch.stack(images).to(self.device)
-                    padded_labels = []
-                    for l in labels:
-                        l = l.clone()
-                        if l.numel() < n_targets:
-                            l = torch.cat([l, torch.full((n_targets - l.numel(),), -1, dtype=l.dtype)])
-                        padded_labels.append(l[:n_targets])
-                    targets = torch.stack(padded_labels).to(self.device).float()
-                    logits = self.model(images)  # [B, n_targets]
-                    mask_valid = (targets != -1)
-                    loss = calculate_loss(logits[mask_valid], targets[mask_valid], self.config.training.loss_function, self.config.training.class_weights)
+                    images = batch['image'].to(self.device)
+                    targets = batch['damaged'].to(self.device)
+                    if self.config.hardware.use_amp:
+                        with autocast(device_type='cuda'):
+                            logits = self.model(images)
+                            loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
+                    else:
+                        logits = self.model(images)
+                        loss = calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=label_smoothing)
                     total_loss += loss.item()
-                    all_predictions.append(logits[mask_valid].detach().cpu())
-                    all_targets.append(targets[mask_valid].detach().cpu())
-                    if batch_idx == 0:
-                        all_images.append(images[:4].cpu())
-                    progress.update(task, advance=1, description=f"[magenta]Validando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
+                    if logits.ndim == 2 and logits.shape[1] == 2:
+                        probs = torch.softmax(logits.detach().cpu(), dim=1)[:, 1]
+                    else:
+                        probs = torch.sigmoid(logits.detach().cpu())
+                    all_predictions.append(probs.view(-1))
+                    all_targets.append(targets.detach().cpu().view(-1))
+                    if batch_idx % 10 == 0 or batch_idx == len(self.val_loader) - 1:
+                        progress.update(task, advance=1, description=f"[magenta]Validando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
+                    else:
+                        progress.update(task, advance=1)
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        metrics = calculate_metrics(all_predictions, all_targets)
+        metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
         metrics['loss'] = total_loss / len(self.val_loader)
         return metrics
     
     def update_scheduler(self, val_metric: float):
         """Actualizar scheduler basado en métrica de validación."""
-        if self.scheduler is not None:
+        if hasattr(self, 'use_warmup') and self.use_warmup:
+            # Warmup las primeras warmup_epochs
+            if self._current_epoch < getattr(self.config.training, 'warmup_epochs', 5):
+                self.warmup_scheduler.step()
+            else:
+                self.scheduler.step(self._current_epoch - getattr(self.config.training, 'warmup_epochs', 5))
+            self._current_epoch += 1
+            # Loggear LR en TensorBoard si está activo
+            if self.tensorboard_writer:
+                for i, param_group in enumerate(self.optimizer.param_groups):
+                    self.tensorboard_writer.add_scalar(f'LR/group_{i}', param_group['lr'], self._current_epoch)
+        elif self.scheduler is not None:
             if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 self.scheduler.step(val_metric)
             else:
@@ -374,15 +486,77 @@ class Trainer:
         )
     
     def print_metrics_table(self, train_metrics, val_metrics, epoch):
+        """Imprimir tabla de métricas con información detallada."""
         table = Table(title=f"Resumen de métricas - Epoch {epoch+1}", box=box.SIMPLE_HEAVY)
         table.add_column("Split", style="bold")
         table.add_column("Loss", justify="right")
         table.add_column("F1", justify="right")
-        table.add_column("IoU", justify="right")
+        table.add_column("Precision", justify="right")
+        table.add_column("Recall", justify="right")
         table.add_column("Accuracy", justify="right")
-        table.add_row("[cyan]Train", f"{train_metrics['loss']:.4f}", f"{train_metrics['f1_score']:.4f}", f"{train_metrics['iou']:.4f}", f"{train_metrics['accuracy']:.4f}")
-        table.add_row("[magenta]Val", f"{val_metrics['loss']:.4f}", f"{val_metrics['f1_score']:.4f}", f"{val_metrics['iou']:.4f}", f"{val_metrics['accuracy']:.4f}")
+        table.add_column("IoU", justify="right")
+        
+        # Obtener métricas adicionales si están disponibles
+        train_precision = train_metrics.get('precision', 0.0)
+        train_recall = train_metrics.get('recall', 0.0)
+        val_precision = val_metrics.get('precision', 0.0)
+        val_recall = val_metrics.get('recall', 0.0)
+        
+        table.add_row(
+            "[cyan]Train", 
+            f"{train_metrics['loss']:.4f}", 
+            f"{train_metrics['f1_score']:.4f}", 
+            f"{train_precision:.4f}",
+            f"{train_recall:.4f}",
+            f"{train_metrics['accuracy']:.4f}", 
+            f"{train_metrics['iou']:.4f}"
+        )
+        table.add_row(
+            "[magenta]Val", 
+            f"{val_metrics['loss']:.4f}", 
+            f"{val_metrics['f1_score']:.4f}", 
+            f"{val_precision:.4f}",
+            f"{val_recall:.4f}",
+            f"{val_metrics['accuracy']:.4f}", 
+            f"{val_metrics['iou']:.4f}"
+        )
         console.print(table)
+        
+        # Información adicional sobre el dataset
+        if hasattr(self, 'train_loader') and hasattr(self, 'val_loader'):
+            # Calcular distribución de clases en train
+            train_damaged = 0
+            train_total = 0
+            for batch in self.train_loader:
+                train_damaged += batch['damaged'].sum().item()
+                train_total += batch['damaged'].size(0)
+            
+            # Calcular distribución de clases en val
+            val_damaged = 0
+            val_total = 0
+            for batch in self.val_loader:
+                val_damaged += batch['damaged'].sum().item()
+                val_total += batch['damaged'].size(0)
+            
+            console.print(f"[bold blue]Distribución de clases:")
+            console.print(f"  Train: {train_damaged}/{train_total} dañados ({train_damaged/train_total*100:.1f}%)")
+            console.print(f"  Val: {val_damaged}/{val_total} dañados ({val_damaged/val_total*100:.1f}%)")
+            
+            # Explicación del comportamiento de métricas
+            if val_metrics['f1_score'] == 0.0 and val_metrics['accuracy'] > 0.5:
+                console.print(f"[bold yellow]⚠️  Análisis de métricas:")
+                console.print(f"  - F1=0.0 pero Accuracy={val_metrics['accuracy']:.4f}")
+                console.print(f"  - Esto indica que el modelo está prediciendo principalmente la clase mayoritaria")
+                console.print(f"  - En datasets desbalanceados, F1 es más confiable que Accuracy")
+                console.print(f"  - Considera usar class_weights o focal_loss para mejorar F1")
+            
+            # Mostrar métricas detalladas si están disponibles
+            if 'tp' in val_metrics and 'tn' in val_metrics and 'fp' in val_metrics and 'fn' in val_metrics:
+                console.print(f"[bold green]Matriz de confusión (Val):")
+                console.print(f"  TP: {val_metrics['tp']}, TN: {val_metrics['tn']}")
+                console.print(f"  FP: {val_metrics['fp']}, FN: {val_metrics['fn']}")
+                console.print(f"  Precision: {val_metrics.get('precision', 0):.4f} (TP/(TP+FP))")
+                console.print(f"  Recall: {val_metrics.get('recall', 0):.4f} (TP/(TP+FN))")
 
     def train(self, resume_from: Optional[str] = None):
         """
@@ -396,6 +570,31 @@ class Trainer:
         # Configurar componentes
         self.setup_data()
         self.setup_model()
+        
+        # --- Mostrar resumen de configuración ---
+        console.rule("[bold blue]Configuración del Entrenamiento[/bold blue]")
+        console.print("[bold cyan]Parámetros del modelo:[/bold cyan]")
+        console.print(f"  Modelo: [yellow]{self.config.model.model_name}[/yellow]")
+        console.print(f"  Learning rate: [yellow]{self.config.training.learning_rate}[/yellow]")
+        console.print(f"  Optimizador: [yellow]{self.config.training.optimizer}[/yellow]")
+        console.print(f"  Scheduler: [yellow]{self.config.training.scheduler}[/yellow]")
+        if hasattr(self.config.training, 'warmup_epochs'):
+            console.print(f"  Warmup epochs: [yellow]{self.config.training.warmup_epochs}[/yellow]")
+        console.print(f"  Épocas totales: [yellow]{self.config.training.epochs}[/yellow]")
+        console.print("\n[bold cyan]Parámetros de pérdida y métricas:[/bold cyan]")
+        console.print(f"  Función de pérdida: [yellow]{self.config.training.loss_function}[/yellow]")
+        console.print(f"  Label smoothing: [yellow]{getattr(self.config.training, 'label_smoothing', 0.0)}[/yellow]")
+        console.print(f"  Class weights: [yellow]{self.config.training.class_weights if hasattr(self.config.training, 'class_weights') else 'No'}[/yellow]")
+        console.print("\n[bold cyan]Parámetros de datos:[/bold cyan]")
+        console.print(f"  Batch size: [yellow]{self.config.data.batch_size}[/yellow]")
+        console.print(f"  Data augmentation: [yellow]{'Sí' if self.use_aug else 'No'}[/yellow]")
+        console.print(f"  Modo de datos: [yellow]{self.config.data.mode}[/yellow]")
+        console.print(f"  Canales máximos: [yellow]{self.config.data.max_channels}[/yellow]")
+        if hasattr(self.config.training, 'swa_start_epoch') and self.config.training.swa_start_epoch is not None:
+            console.print("\n[bold cyan]Stochastic Weight Averaging:[/bold cyan]")
+            console.print(f"  Inicio en época: [yellow]{self.config.training.swa_start_epoch}[/yellow]")
+        console.rule()
+        print()  # Línea en blanco para separar
         
         if self.config.hardware.distributed:
             self.setup_distributed()
@@ -413,43 +612,129 @@ class Trainer:
         print()
 
         # Ciclo de entrenamiento
-        best_f1 = 0.0
+        best_f1 = self.best_metric if hasattr(self, 'best_metric') else 0.0
         best_epoch = 0
+        # --- Opción 7: Inicializar SWA si corresponde ---
+        if self.swa_start_epoch is not None:
+            self.swa_model = AveragedModel(self.model)
+            self.swa_scheduler = SWALR(self.optimizer, swa_lr=self.config.training.learning_rate * 0.1)
         for epoch in range(start_epoch, self.config.training.epochs):
             console.rule(f"[bold green]Época {epoch+1}/{self.config.training.epochs}")
+            
             train_metrics = self.train_epoch(epoch)
+            
             if epoch % self.config.training.val_frequency == 0 and self.val_loader is not None:
-                val_metrics = self.validate_epoch(epoch)
+                # --- Opción 6: Buscar threshold óptimo por época y calcular métricas finales con ese threshold ---
+                thresholds = np.linspace(0.05, 0.95, 19)
+                tps = np.zeros_like(thresholds)
+                fps = np.zeros_like(thresholds)
+                fns = np.zeros_like(thresholds)
+                total_loss_val = 0.0
+                n_val = 0
+                for batch in self.val_loader:
+                    images = batch['image'].to(self.device)
+                    targets = batch['damaged'].to(self.device)
+                    with torch.no_grad():
+                        logits = self.model(images)
+                        if logits.ndim == 2 and logits.shape[1] == 2:
+                            probs = torch.softmax(logits, dim=1)[:, 1]
+                        else:
+                            probs = torch.sigmoid(logits)
+                        for i, t in enumerate(thresholds):
+                            preds_bin = (probs > t).float()
+                            tps[i] += ((preds_bin == 1) & (targets == 1)).sum().item()
+                            fps[i] += ((preds_bin == 1) & (targets == 0)).sum().item()
+                            fns[i] += ((preds_bin == 0) & (targets == 1)).sum().item()
+                        total_loss_val += calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=getattr(self.config.training, 'label_smoothing', 0.0)).item()
+                        n_val += 1
+                best_f1_epoch = 0.0
+                best_t = 0.5
+                for i, t in enumerate(thresholds):
+                    precision = tps[i] / (tps[i] + fps[i] + 1e-7)
+                    recall = tps[i] / (tps[i] + fns[i] + 1e-7)
+                    f1 = 2 * (precision * recall) / (precision + recall + 1e-7)
+                    if f1 > best_f1_epoch:
+                        best_f1_epoch = f1
+                        best_t = t
+                self.best_threshold = best_t
+                console.print(f"[bold cyan]Threshold óptimo en val: {best_t:.2f} (F1={best_f1_epoch:.4f})[/bold cyan]")
+                # Calcular métricas finales con el threshold óptimo
+                # Recorre de nuevo para calcular métricas completas con el threshold óptimo
+                all_predictions = []
+                all_targets = []
+                for batch in self.val_loader:
+                    images = batch['image'].to(self.device)
+                    targets = batch['damaged'].to(self.device)
+                    with torch.no_grad():
+                        logits = self.model(images)
+                        if logits.ndim == 2 and logits.shape[1] == 2:
+                            probs = torch.softmax(logits, dim=1)[:, 1]
+                        else:
+                            probs = torch.sigmoid(logits)
+                        all_predictions.append(probs.cpu())
+                        all_targets.append(targets.cpu())
+                all_predictions = torch.cat(all_predictions, dim=0)
+                all_targets = torch.cat(all_targets, dim=0)
+                val_metrics = calculate_metrics(all_predictions, all_targets, threshold=best_t)
+                val_metrics['loss'] = total_loss_val / max(1, n_val)
                 self.print_metrics_table(train_metrics, val_metrics, epoch)
+                
                 step = epoch * len(self.train_loader)
                 log_metrics(
-                    {**train_metrics, **val_metrics},
+                    {**train_metrics, **val_metrics, 'best_threshold': self.best_threshold},
                     step,
                     use_wandb=self.config.logging.wandb,
                     use_tensorboard=self.config.logging.tensorboard,
                     tensorboard_writer=self.tensorboard_writer
                 )
+                
+                # Actualizar historial
                 for key in train_metrics:
                     if f'train_{key}' in self.metrics_history:
                         self.metrics_history[f'train_{key}'].append(train_metrics[key])
                 for key in val_metrics:
                     if f'val_{key}' in self.metrics_history:
                         self.metrics_history[f'val_{key}'].append(val_metrics[key])
-                # Guardar el mejor modelo SOLO EN MEMORIA
+                
+                # Guardar el mejor modelo en disco INMEDIATAMENTE si mejora F1
                 if val_metrics['f1_score'] > best_f1:
                     best_f1 = val_metrics['f1_score']
+                    self.best_metric = best_f1
                     best_epoch = epoch+1
-                    console.print(f"[bold yellow]Nuevo mejor modelo (F1={best_f1:.4f}) guardado en memoria en epoch {best_epoch}")
+                    console.print(f"[bold yellow]Nuevo mejor modelo (F1={best_f1:.4f}) guardado en disco en epoch {best_epoch}")
                     self.best_model_state = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in self.model.state_dict().items()}
                     self.best_optimizer_state = self.optimizer.state_dict()
                     self.best_epoch = epoch
                     self.best_train_metrics = train_metrics.copy()
                     self.best_val_metrics = val_metrics.copy()
+                    # Guardar checkpoint en disco con nombre fijo best.pth
+                    checkpoint_path = f"{self.config.logging.models_dir}/best.pth"
+                    save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        epoch,
+                        {**train_metrics, **val_metrics},
+                        checkpoint_path,
+                        is_best=True
+                    )
+                # --- Opción 7: Actualizar SWA si corresponde ---
+                if self.swa_model is not None and epoch >= self.swa_start_epoch:
+                    self.swa_model.update_parameters(self.model)
+                    self.swa_scheduler.step()
+                    self.swa_active = True
                 self.update_scheduler(val_metrics['f1_score'])
-                if self.check_early_stopping(val_metrics['f1_score']):
+                
+                # --- Opción 9: Early stopping robusto (reset si baja LR) ---
+                if hasattr(self, 'scheduler') and hasattr(self.scheduler, 'get_last_lr'):
+                    current_lr = self.scheduler.get_last_lr()[0]
+                    if hasattr(self, '_last_lr') and current_lr < self._last_lr:
+                        self.patience_counter = 0
+                        console.print("[bold green]LR bajó, early stopping patience reseteada[/bold green]")
+                    self._last_lr = current_lr
+                # Early stopping: evaluar cada época usando la última métrica disponible
+                if self.check_early_stopping(best_f1):
                     console.print(f"[bold red]Early stopping activado en epoch {epoch+1}")
                     break
-                # Guardar checkpoint regular si corresponde
             else:
                 step = epoch * len(self.train_loader)
                 log_metrics(
@@ -462,17 +747,8 @@ class Trainer:
                 )
                 console.print(f"[cyan]Train - Loss: {train_metrics['loss']:.4f}, F1: {train_metrics['f1_score']:.4f}, IoU: {train_metrics['iou']:.4f}")
         
-        # Guardar el mejor modelo a disco al final
-        if self.best_model_state is not None:
-            self.model.load_state_dict(self.best_model_state)
-            self.optimizer.load_state_dict(self.best_optimizer_state)
-            self.save_checkpoint(
-                self.best_epoch,
-                self.best_train_metrics,
-                self.best_val_metrics,
-                is_best=True
-            )
-            console.print(f"[bold green]Mejor modelo guardado en disco en epoch {self.best_epoch+1}")
+        # Ya no se guarda el mejor modelo aquí, solo el "last" si corresponde
+        
         # Guardar modelo final si corresponde
         if self.config.training.save_last:
             self.save_checkpoint(
@@ -481,8 +757,6 @@ class Trainer:
                 val_metrics if 'val_metrics' in locals() else train_metrics
             )
         
-        # Graficar historial de métricas
-        # (Eliminado: no se genera gráfico de historial de métricas)
         console.rule("[bold green]Entrenamiento completado")
         console.print(f"[bold green]Mejor F1: {best_f1:.4f} en epoch {best_epoch}")
         
@@ -490,19 +764,85 @@ class Trainer:
         if self.tensorboard_writer:
             self.tensorboard_writer.close()
 
+    # --- Opción 8: Test-time augmentation (TTA) ---
+    def predict_tta(self, loader, n_aug=4):
+        """
+        Realiza Test-Time Augmentation (TTA) usando hasta n_aug vistas:
+        - 1: original
+        - 2: + flip horizontal
+        - 3: + flip vertical
+        - 4: + rotación 90º
+        (puedes ampliar con más augmentaciones si lo deseas)
+        """
+        self.model.eval()
+        all_probs = []
+        with torch.no_grad():
+            for batch in loader:
+                images = batch['image'].to(self.device)
+                aug_images = [images]
+                if n_aug > 1:
+                    aug_images.append(torch.flip(images, dims=[-1]))  # horizontal
+                if n_aug > 2:
+                    aug_images.append(torch.flip(images, dims=[-2]))  # vertical
+                if n_aug > 3:
+                    aug_images.append(torch.rot90(images, k=1, dims=[-2, -1]))
+                # Si quieres más augmentaciones, añádelas aquí
+                probs = 0
+                for aug in aug_images[:n_aug]:
+                    logits = self.model(aug)
+                    if logits.ndim == 2 and logits.shape[1] == 2:
+                        probs += torch.softmax(logits, dim=1)[:, 1]
+                    else:
+                        probs += torch.sigmoid(logits)
+                probs = probs / len(aug_images[:n_aug])
+                all_probs.append(probs.cpu())
+        return torch.cat(all_probs, dim=0)
+
+# --- Opción 10: Leave-one-event-out CV (estructura) ---
+def leave_one_event_out_cv(config):
+    from data_loader import EarthquakeTileDataset
+    meta = EarthquakeTileDataset(
+        data_root=getattr(config.data, 'data_root', 'preprocessed'),
+        split=getattr(config.data, 'split', 'full'),
+        mode=getattr(config.data, 'mode', 'post_only'),
+        filter_has_data=getattr(config.data, 'filter_has_data', True),
+        max_channels=getattr(config.data, 'max_channels', 3)
+    ).meta_df
+    unique_events = meta['event'].unique()
+    for fold, event in enumerate(unique_events):
+        print(f"[CV] Fold {fold+1}/{len(unique_events)}: evento {event}")
+        # Aquí deberías crear splits train/val dejando fuera el evento actual
+        # y entrenar un modelo por fold, guardando resultados
+        # ...
+
 
 def main():
     """Función principal para ejecutar el entrenamiento."""
     parser = argparse.ArgumentParser(description="Entrenamiento de modelo de detección de daños")
-    parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML",default="config.yaml")
+    parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML", default="config.yaml")
     parser.add_argument("--resume", type=str, help="Ruta al checkpoint para resumir")
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
-    parser.add_argument("--epochs", type=int, help="Número de épocas",default=1)
-    parser.add_argument("--batch_size", type=int, help="Tamaño de batch")
-    parser.add_argument("--lr", type=float, help="Learning rate")
-    parser.add_argument("--model", type=str, help="Nombre del modelo",default='linear_per_tile')
+    parser.add_argument("--epochs", type=int, help="Número de épocas", default=10)
+    parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
+    parser.add_argument("--lr", default=0.001, type=float, help="Learning rate")
+    parser.add_argument("--model", type=str, help="Nombre del modelo", default='cnn_classifier')
+    # Cambiar optimizador y scheduler por defecto
+    parser.add_argument("--optimizer", type=str, default="adamw", help="Optimizador (adam, adamw, sgd)")
+    parser.add_argument("--scheduler", type=str, default="cosine", help="Scheduler (cosine, step, plateau)")
     parser.add_argument("--distributed", action="store_true", help="Usar entrenamiento distribuido")
-    parser.add_argument("--prueba", action="store_true", help="Si se usa, emplea dataloader_small en vez de full",default=True)
+    parser.add_argument("--small_dataset", action="store_true", help="Usar dataset small para pruebas rápidas")
+    parser.add_argument("--small_percentage", type=float, default=0.2, help="Porcentaje para dataset small")
+    parser.add_argument("--mode", type=str, default='pre_only', choices=['pre_post', 'pre_only', 'post_only'],
+                       help='Modo de datos: pre_post, pre_only, post_only')
+    parser.add_argument("--max_channels", type=int, help="Máximo número de canales a usar",default=3)
+    # NUEVO: Argumentos para tipo de loss y threshold
+    parser.add_argument("--loss_type", type=str, default="bce_dice", choices=["bce", "dice", "bce_dice", "focal"], help="Tipo de función de pérdida")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Umbral para binarización de clase positiva")
+    parser.add_argument("--warmup_epochs", type=int, default=5, help="Épocas de warmup para el scheduler")
+    parser.add_argument("--scheduler_t0", type=int, default=10, help="T_0 para CosineAnnealingWarmRestarts")
+    parser.add_argument("--use_aug", action="store_true",default=True, help="Usar data augmentation y muestreo balanceado (get_dataloaders_aug)")
+    parser.add_argument("--label_smoothing", type=float, default=0.05, help="Label smoothing binario (0.0 = sin smoothing, típico 0.05)")
+    parser.add_argument("--swa_start_epoch", type=int, default=None, help="Época a partir de la cual activar SWA (Stochastic Weight Averaging)")
     args = parser.parse_args()
     
     # Cargar configuración
@@ -522,13 +862,34 @@ def main():
         config.training.learning_rate = args.lr
     if args.model is not None:
         config.model.model_name = args.model
+    if args.optimizer:
+        config.training.optimizer = args.optimizer
+    if args.scheduler:
+        config.training.scheduler = args.scheduler
     if args.distributed:
         config.hardware.distributed = True
-    # Nuevo: modo prueba
-    config.data.split = 'small' if args.prueba else 'full'
+    if args.small_dataset:
+        config.data.split = 'small'
+        config.data.small_percentage = args.small_percentage
+    if args.mode:
+        config.data.mode = args.mode
+    if args.max_channels:
+        config.data.max_channels = args.max_channels
+    if args.loss_type:
+        config.training.loss_function = args.loss_type
+    if args.threshold is not None:
+        config.training.threshold = args.threshold
+    if args.warmup_epochs is not None:
+        config.training.warmup_epochs = args.warmup_epochs
+    if args.scheduler_t0 is not None:
+        config.training.scheduler_t0 = args.scheduler_t0
+    if args.label_smoothing is not None:
+        config.training.label_smoothing = args.label_smoothing
+    if args.swa_start_epoch is not None:
+        config.training.swa_start_epoch = args.swa_start_epoch
     
     # Crear trainer y ejecutar entrenamiento
-    trainer = Trainer(config)
+    trainer = Trainer(config, use_aug=args.use_aug)
     trainer.train(resume_from=args.resume)
 
 

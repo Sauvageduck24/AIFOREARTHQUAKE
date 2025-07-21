@@ -103,14 +103,29 @@ def calculate_metrics(
     Returns:
         Diccionario con métricas calculadas
     """
-    # Si predictions es 1D, no accedemos a shape[1]
-    if predictions.ndim > 1 and predictions.shape[1] == 1:
-        predictions = predictions.squeeze(1)
-    if targets.ndim > 1 and targets.shape[1] == 1:
+    # Manejar diferentes formatos de predicciones
+    if predictions.ndim == 2 and predictions.shape[1] == 2:
+        # Caso: predicciones con dos salidas [batch, 2]
+        # Usar softmax y tomar la probabilidad de la clase positiva (dañado)
+        probs = F.softmax(predictions, dim=1)
+        preds_probs = probs[:, 1]  # Probabilidad de la clase positiva
+    else:
+        # Caso original: predicciones con una salida
+        # Si predictions es 1D, no accedemos a shape[1]
+        if predictions.ndim > 1 and predictions.shape[1] == 1:
+            predictions = predictions.squeeze(1)
+        
+        # Binarizar predicciones
+        preds_probs = torch.sigmoid(predictions)
+    
+    # Asegurar que targets esté en el formato correcto (no one-hot)
+    if targets.ndim == 2 and targets.shape[1] == 2:
+        targets = targets.argmax(dim=1)  # Convertir de one-hot a índices
+    elif targets.ndim == 2 and targets.shape[1] == 1:
         targets = targets.squeeze(1)
     
     # Binarizar predicciones
-    preds_bin = (torch.sigmoid(predictions) > threshold).float()
+    preds_bin = (preds_probs > threshold).float()
     targets_bin = targets.float()
     
     # Calcular métricas básicas
@@ -138,14 +153,14 @@ def calculate_metrics(
     
     # Calcular AUC-ROC
     try:
-        fpr, tpr, _ = roc_curve(targets_bin.cpu().numpy(), preds_bin.cpu().numpy())
+        fpr, tpr, _ = roc_curve(targets_bin.cpu().numpy(), preds_probs.cpu().numpy())
         auc_roc = auc(fpr, tpr)
     except:
         auc_roc = 0.0
     
     # Calcular AUC-PR
     try:
-        precision_curve, recall_curve, _ = precision_recall_curve(targets_bin.cpu().numpy(), preds_bin.cpu().numpy())
+        precision_curve, recall_curve, _ = precision_recall_curve(targets_bin.cpu().numpy(), preds_probs.cpu().numpy())
         auc_pr = auc(recall_curve, precision_curve)
     except:
         auc_pr = 0.0
@@ -170,7 +185,8 @@ def calculate_loss(
     predictions: torch.Tensor,
     targets: torch.Tensor,
     loss_type: str = "bce_dice",
-    class_weights: Optional[torch.Tensor] = None
+    class_weights: Optional[torch.Tensor] = None,
+    label_smoothing: float = 0.0
 ) -> torch.Tensor:
     """
     Calcular función de pérdida.
@@ -180,18 +196,76 @@ def calculate_loss(
         targets: Targets reales
         loss_type: Tipo de pérdida
         class_weights: Pesos de clases (opcional)
+        label_smoothing: Suavizado de etiquetas (0.0 = sin smoothing, típico 0.05)
         
     Returns:
         Tensor con el valor de pérdida
     """
+    # Manejar diferentes formatos de predicciones
+    if predictions.ndim == 2 and predictions.shape[1] == 2:
+        # Caso: predicciones con Softmax [batch, 2]
+        # Convertir targets a one-hot encoding para cross_entropy
+        targets_one_hot = torch.zeros_like(predictions)
+        targets_one_hot.scatter_(1, targets.unsqueeze(1).long(), 1)
+        targets = targets_one_hot
+        
+        # Para cross_entropy necesitamos logits, no probabilidades
+        # Si las predicciones ya tienen Softmax aplicado, necesitamos convertirlas a logits
+        # Pero es mejor que el modelo devuelva logits y aplicar Softmax en la pérdida
+        if loss_type == "bce":
+            if class_weights is not None:
+                # Convertir class_weights a tensor si es una lista
+                if isinstance(class_weights, list):
+                    class_weights = torch.tensor(class_weights, device=predictions.device, dtype=predictions.dtype)
+                loss = F.cross_entropy(predictions, targets.argmax(dim=1), weight=class_weights)
+            else:
+                loss = F.cross_entropy(predictions, targets.argmax(dim=1))
+        elif loss_type == "dice":
+            loss = dice_loss(predictions, targets)
+        elif loss_type == "bce_dice":
+            if class_weights is not None:
+                # Convertir class_weights a tensor si es una lista
+                if isinstance(class_weights, list):
+                    class_weights = torch.tensor(class_weights, device=predictions.device, dtype=predictions.dtype)
+                bce_loss = F.cross_entropy(predictions, targets.argmax(dim=1), weight=class_weights)
+            else:
+                bce_loss = F.cross_entropy(predictions, targets.argmax(dim=1))
+            dice_loss_val = dice_loss(predictions, targets)
+            loss = 0.5 * bce_loss + 0.5 * dice_loss_val
+        elif loss_type == "focal":
+            loss = focal_loss(predictions, targets, alpha=0.25, gamma=2.0)
+        else:
+            raise ValueError(f"Tipo de pérdida {loss_type} no soportado")
+        
+        return loss
+    
+    # Caso original: predicciones con una salida (logit)
+    # Asegurar shapes compatibles
+    if predictions.ndim > 1 and predictions.shape[1] == 1:
+        predictions = predictions.squeeze(1)
+    if targets.ndim > 1 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)
+    # Si predictions es [batch,1] y targets es [batch], igualar
+    if predictions.ndim == 2 and predictions.shape[1] == 1:
+        predictions = predictions.squeeze(1)
+    if targets.ndim == 2 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)
+    # --- Label smoothing binaria ---
+    if label_smoothing > 0.0:
+        # y = y*(1-smooth) + 0.5*smooth
+        targets = targets * (1.0 - label_smoothing) + 0.5 * label_smoothing
+    
     if loss_type == "bce":
         if predictions.ndim > 1 and predictions.shape[1] == 1:
             predictions = predictions.squeeze(1)
         if targets.ndim > 1 and targets.shape[1] == 1:
             targets = targets.squeeze(1)
+        
         if class_weights is not None:
-            class_weights = torch.tensor(class_weights, device=predictions.device, dtype=predictions.dtype)
-            loss = F.binary_cross_entropy_with_logits(predictions, targets, pos_weight=class_weights)
+            # Para binary_cross_entropy_with_logits, usamos pos_weight (peso para clase positiva)
+            # class_weights[1] es el peso para la clase positiva (dañados)
+            pos_weight = torch.tensor(class_weights[1], device=predictions.device, dtype=predictions.dtype)
+            loss = F.binary_cross_entropy_with_logits(predictions, targets, pos_weight=pos_weight)
         else:
             loss = F.binary_cross_entropy_with_logits(predictions, targets)
     
@@ -199,7 +273,11 @@ def calculate_loss(
         loss = dice_loss(predictions, targets)
     
     elif loss_type == "bce_dice":
-        bce_loss = F.binary_cross_entropy_with_logits(predictions, targets, pos_weight=class_weights)
+        if class_weights is not None:
+            pos_weight = torch.tensor(class_weights[1], device=predictions.device, dtype=predictions.dtype)
+            bce_loss = F.binary_cross_entropy_with_logits(predictions, targets, pos_weight=pos_weight)
+        else:
+            bce_loss = F.binary_cross_entropy_with_logits(predictions, targets)
         dice_loss_val = dice_loss(predictions, targets)
         loss = 0.5 * bce_loss + 0.5 * dice_loss_val
     
@@ -215,29 +293,34 @@ def calculate_loss(
 def dice_loss(predictions: torch.Tensor, targets: torch.Tensor, smooth: float = 1e-6) -> torch.Tensor:
     """
     Calcular pérdida Dice.
-    
-    Args:
-        predictions: Predicciones del modelo
-        targets: Targets reales
-        smooth: Factor de suavizado
-        
-    Returns:
-        Tensor con el valor de pérdida Dice
     """
-    if predictions.shape[1] == 1:
+    # Si predictions es 2D y la segunda dimensión es 2, usar softmax y tomar la clase positiva
+    if predictions.ndim == 2 and predictions.shape[1] == 2:
+        probs = F.softmax(predictions, dim=1)
+        probs = probs[:, 1]  # Tomar probabilidad de la clase positiva (dañado)
+    # Si predictions es 2D y la segunda dimensión es 1, aplicar sigmoid
+    elif predictions.ndim == 2 and predictions.shape[1] == 1:
+        probs = torch.sigmoid(predictions)
+    # Si predictions es 1D, aplicar sigmoid directamente
+    elif predictions.ndim == 1:
         probs = torch.sigmoid(predictions)
     else:
         probs = F.softmax(predictions, dim=1)
-        probs = probs[:, 1:2]
+        probs = probs[:, 1]  # Tomar probabilidad de la clase positiva
     
-    # Aplanar tensores
-    probs_flat = probs.view(-1)
-    targets_flat = targets.view(-1)
+    # Asegurar que targets esté en el formato correcto (no one-hot)
+    if targets.ndim == 2 and targets.shape[1] == 2:
+        targets = targets.argmax(dim=1)  # Convertir de one-hot a índices
+    elif targets.ndim == 2 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)
+    
+    # Aplanar tensores y asegurar que sean float
+    probs_flat = probs.view(-1).float()
+    targets_flat = targets.view(-1).float()
     
     # Calcular Dice
     intersection = (probs_flat * targets_flat).sum()
     dice = (2. * intersection + smooth) / (probs_flat.sum() + targets_flat.sum() + smooth)
-    
     return 1 - dice
 
 
@@ -259,15 +342,25 @@ def focal_loss(
     Returns:
         Tensor con el valor de pérdida Focal
     """
-    if predictions.shape[1] == 1:
+    # Si predictions es 2D y la segunda dimensión es 2, usar softmax y tomar la clase positiva
+    if predictions.ndim == 2 and predictions.shape[1] == 2:
+        probs = F.softmax(predictions, dim=1)
+        probs = probs[:, 1]  # Tomar probabilidad de la clase positiva (dañado)
+    elif predictions.shape[1] == 1:
         probs = torch.sigmoid(predictions)
     else:
         probs = F.softmax(predictions, dim=1)
-        probs = probs[:, 1:2]
+        probs = probs[:, 1]  # Tomar probabilidad de la clase positiva
     
-    # Aplanar tensores
-    probs_flat = probs.view(-1)
-    targets_flat = targets.view(-1)
+    # Asegurar que targets esté en el formato correcto (no one-hot)
+    if targets.ndim == 2 and targets.shape[1] == 2:
+        targets = targets.argmax(dim=1)  # Convertir de one-hot a índices
+    elif targets.ndim == 2 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)
+    
+    # Aplanar tensores y asegurar que sean float
+    probs_flat = probs.view(-1).float()
+    targets_flat = targets.view(-1).float()
     
     # Calcular Focal Loss
     bce_loss = F.binary_cross_entropy(probs_flat, targets_flat, reduction='none')

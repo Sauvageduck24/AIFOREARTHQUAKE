@@ -19,14 +19,14 @@ class DataConfig:
     """Configuración relacionada con datos y preprocesamiento."""
     
     # Rutas de datos
-    data_root: str = "data"
+    data_root: str = "preprocessed"  # Directorio raíz de datos preprocesados
     raw_data_path: str = "data/raw"
     processed_data_path: str = "data/processed"
     splits_path: str = "data/splits"
     
     # Configuración de imágenes
-    image_size: int = 512
-    channels: int = 3
+    image_size: int = 128  # Tamaño de tiles
+    channels: int = 4  # Número de canales (4 para post_only, 8 para pre_post)
     num_classes: int = 2  # Dañado vs No dañado
     
     # Configuración de DataLoader
@@ -39,14 +39,21 @@ class DataConfig:
     train_split: float = 0.7
     val_split: float = 0.15
     test_split: float = 0.15
+    split_ratio: float = 0.8  # Proporción train/val para el nuevo sistema
     
     # Configuración de aumentos
     use_augmentation: bool = True
     augmentation_prob: float = 0.5
-    # Split de datos a usar (full, small, etc)
+    
+    # Split de datos a usar (full, test, unknown)
     split: str = "full"
-    # Modo de dataset (basic, intermediate, etc)
-    mode: str = "basic"
+    
+    # Modo de dataset (pre_post, pre_only, post_only)
+    mode: str = "post_only"
+    
+    # Filtros para el nuevo sistema
+    filter_has_data: bool = True  # Solo tiles con datos disponibles
+    max_channels: Optional[int] = None  # Máximo número de canales a usar
 
 
 @dataclass
@@ -54,12 +61,12 @@ class ModelConfig:
     """Configuración relacionada con el modelo."""
     
     # Arquitectura
-    model_name: str = "unet"
+    model_name: str = "simple_classifier"  # Modelo por defecto para el nuevo sistema
     backbone: str = "resnet50"
     pretrained: bool = True
     
     # Hiperparámetros del modelo
-    in_channels: int = 6  # 3 pre + 3 post
+    in_channels: int = 4  # 4 para post_only, 8 para pre_post
     out_channels: int = 1  # Máscara binaria
     encoder_depth: int = 5
     decoder_channels: List[int] = field(default_factory=lambda: [256, 128, 64, 32, 16])
@@ -75,9 +82,9 @@ class ModelConfig:
     in_features: int = 1572864      # Número de características de entrada para modelos lineales
     # Número de salidas para modelos lineales o custom
     out_features: int = 1     # Número de salidas para modelos lineales o custom
-    # NUEVO: para modelo linear_per_tile
-    tile_size: int = 512
-    n_targets: int = 300
+    # Para modelo linear_per_tile y simple_classifier
+    tile_size: int = 128  # Tamaño de tiles
+    n_targets: int = 1  # Para clasificación binaria por tile
 
 
 @dataclass

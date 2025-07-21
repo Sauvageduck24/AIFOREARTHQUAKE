@@ -19,6 +19,10 @@ def main():
         print(f"CRS: {gdf.crs}")
         print(f"Primeras filas:")
         print(gdf.head())
+        if 'damaged' in gdf.columns:
+            print(f"\nValores únicos en la columna 'damaged': {gdf['damaged'].unique()}")
+        else:
+            print("\nLa columna 'damaged' no está presente en el archivo.")
     except Exception as e:
         print(f"Error al leer el archivo: {e}")
         sys.exit(1)

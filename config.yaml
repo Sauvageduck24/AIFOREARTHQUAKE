@@ -1,18 +1,21 @@
 model:
-  model_name: linear_per_tile
-  in_channels: 6         # Cambia según tus datos (ej. 6 si usas 3 pre + 3 post)
-  tile_size: 512         # Tamaño de tus tiles
-  n_targets: 300         # Máximo número de fids por tile (ajusta según tu dataset)
+  model_name: simple_classifier
+  in_channels: 3         # Cambia según tus datos (ej. 4 para post_only, 8 para pre_post)
+  tile_size: 128         # Tamaño de tus tiles
+  n_targets: 1           # Para clasificación binaria por tile
   dropout: 0.1
   attention: false
 
 data:
-  processed_data_path: data/preprocessed
+  data_root: preprocessed  # Directorio raíz de datos preprocesados
   batch_size: 8
-  num_workers: 2
+  num_workers: 8
   pin_memory: true
   split: full
-  mode: basic
+  mode: post_only        # pre_post, pre_only, post_only
+  filter_has_data: true
+  max_channels: null     # null = todos los canales
+  split_ratio: 0.8       # Proporción train/val
 
 training:
   epochs: 10
@@ -25,17 +28,30 @@ training:
   save_frequency: 5
   early_stopping_patience: 10
   early_stopping_min_delta: 0.0001
+  scheduler_factor: 0.5
+  scheduler_patience: 5
+  save_last: true
+  class_weights: [1.0, 3.0]  # Peso mayor para la clase minoritaria (dañados)
 
 hardware:
   device: auto
   use_amp: true
+  distributed: false
+  backend: nccl
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
 
 logging:
   log_dir: outputs/logs
   tensorboard: true
   wandb: false
+  wandb_project: earthquake-damage-detection
+  wandb_entity: null
   output_dir: outputs
   models_dir: outputs/models
   predictions_dir: outputs/predictions
   log_frequency: 10
-  log_images: false 
+  log_images: false
+
+seed: 42
+deterministic: true 
