@@ -59,8 +59,9 @@ class EarthquakeTileDataset(Dataset):
         # Filtrar por disponibilidad de datos según modo
         if filter_has_data:
             if mode == 'pre_post':
+                # Incluir tiles que tengan al menos pre o post
                 self.meta_df = self.meta_df[
-                    (self.meta_df['has_pre'] == 1) & (self.meta_df['has_post'] == 1)
+                    (self.meta_df['has_pre'] == 1) | (self.meta_df['has_post'] == 1)
                 ]
             elif mode == 'pre_only':
                 self.meta_df = self.meta_df[self.meta_df['has_pre'] == 1]
@@ -126,6 +127,10 @@ class EarthquakeTileDataset(Dataset):
                 np.ones(pre_data.shape[0]) if has_pre else np.zeros(pre_data.shape[0]),
                 np.ones(post_data.shape[0]) if has_post else np.zeros(post_data.shape[0])
             ])
+            # Expandir la máscara a (C_total, H, W)
+            mask = mask[:, None, None].astype(np.float32)
+            mask = np.broadcast_to(mask, image.shape).copy()
+            assert mask.shape == image.shape, f"Presence mask shape {mask.shape} != image shape {image.shape}"
         elif self.mode == 'pre_only':
             image = pre_data
             mask = np.ones(pre_data.shape[0]) if has_pre else np.zeros(pre_data.shape[0])
@@ -147,7 +152,8 @@ class EarthquakeTileDataset(Dataset):
             pad = np.zeros((expected_channels - image.shape[0], image.shape[1], image.shape[2]), dtype=image.dtype)
             image = np.concatenate([image, pad], axis=0)
             # Extender la máscara con ceros para los canales añadidos
-            mask = np.concatenate([mask, np.zeros(expected_channels - len(mask))])
+            faltan = expected_channels - mask.shape[0]
+            mask = np.concatenate([mask, np.zeros((faltan, image.shape[1], image.shape[2]), dtype=mask.dtype)], axis=0)
         elif image.shape[0] > expected_channels:
             image = image[:expected_channels]
             mask = mask[:expected_channels]
@@ -194,7 +200,12 @@ def custom_collate(batch):
             batch_out[key] = torch.stack([d[key] for d in batch])
         elif key in ['presence_mask']:
             # Apilar máscaras de presencia
-            batch_out[key] = torch.stack([d[key] for d in batch])
+            masks = [d[key] for d in batch]
+            # Si alguna máscara es 3D (C, H, W), apila normalmente
+            # Si alguna es 1D (C,), expande a (C, 1, 1) y luego apila
+            if masks[0].ndim == 1:
+                masks = [m[:, None, None] for m in masks]
+            batch_out[key] = torch.stack(masks)
         elif key in ['damaged']:
             # Apilar labels
             batch_out[key] = torch.stack([d[key] for d in batch])

@@ -8,6 +8,7 @@ import shutil
 import json
 from pathlib import Path
 from model import get_model
+from model import SiameseCNNClassifier
 from config import Config
 from utils import setup_logging
 from data_loader import EarthquakeTileDataset, custom_collate, get_dataloaders
@@ -19,7 +20,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generar predicciones para submission de la competición.")
     parser.add_argument('--model_path', type=str, default='outputs/models/checkpoint_epoch_2.pth', help='Ruta al modelo .pth')
     parser.add_argument('--input_dir', type=str, default='submissions/submission_1', help='Carpeta con archivos .gpkg a predecir')
-    parser.add_argument('--output_dir', type=str, default='submissions/submission_4', help='Carpeta donde guardar la submission')
+    parser.add_argument('--output_dir', type=str, default='submissions/submission_5', help='Carpeta donde guardar la submission')
     parser.add_argument('--config', type=str, default='config.yaml', help='Archivo de configuración')
     parser.add_argument('--device', type=str, default='cuda', help='cpu o cuda')
     parser.add_argument('--split', type=str, default='test', help='Split de preprocesado a usar (test o full)')
@@ -54,7 +55,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     # Cargar configuración y modelo
     config = Config.from_yaml(args.config)
-    config.model.model_name = 'cnn_classifier'  # Forzar el modelo correcto para el checkpoint
+    config.model.model_name = 'siamese_cnn_classifier'  # Forzar el modelo correcto para el checkpoint
     config.hardware.device = args.device
     device = torch.device(args.device)
     # Usar threshold óptimo guardado en config si existe
@@ -80,7 +81,11 @@ def main():
     with torch.no_grad():
         for batch in tqdm(test_loader, desc='Inferencia'): 
             images = batch['image'].to(device)  # [B, C, H, W]
-            logits = model(images)
+            presence_mask = batch['presence_mask'].to(device) if 'presence_mask' in batch else None
+            if isinstance(model, SiameseCNNClassifier):
+                logits = model(images, presence_mask)
+            else:
+                logits = model(images)
             if logits.ndim == 1:
                 logits = logits.unsqueeze(1)
             probs = torch.sigmoid(logits).cpu().numpy()  # [B, 1] o [B]

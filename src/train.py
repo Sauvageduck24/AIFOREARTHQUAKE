@@ -34,6 +34,7 @@ console = Console()
 from config import Config, get_default_config
 from data_loader import EarthquakeTileDataset, SubsetEarthquakeTileDataset, custom_collate
 from model import get_model
+from model import SiameseCNNClassifier
 from utils import (
     set_seed, setup_logging, calculate_metrics, calculate_loss,
     save_checkpoint, load_checkpoint, log_metrics, setup_wandb,
@@ -344,10 +345,7 @@ class Trainer:
         all_targets = []
         threshold = getattr(self.config.training, 'threshold', 0.5)
         label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
-        
-        # Pre-calcular tamaño del dataset para la barra de progreso
         n_batches = len(self.train_loader)
-        
         with Progress(
             SpinnerColumn(),
             "[progress.description]{task.description}",
@@ -358,19 +356,17 @@ class Trainer:
             transient=True
         ) as progress:
             task = progress.add_task(f"[cyan]Entrenando (Epoch {epoch+1})", total=n_batches)
-            
-            # Usar torch.cuda.amp.autocast() para mixed precision
             scaler = self.scaler if self.config.hardware.use_amp else None
-            
             for batch_idx, batch in enumerate(self.train_loader):
-                # Mover datos a GPU de una vez
                 images = batch['image'].to(self.device, non_blocking=True)
+                presence_mask = batch['presence_mask'].to(self.device, non_blocking=True) if 'presence_mask' in batch else None
                 targets = batch['damaged'].to(self.device, non_blocking=True)
-                
-                # Mixed precision training
                 if scaler is not None:
                     with autocast(device_type='cuda', dtype=torch.float16):
-                        logits = self.model(images)
+                        if isinstance(self.model, SiameseCNNClassifier):
+                            logits = self.model(images, presence_mask)
+                        else:
+                            logits = self.model(images)
                         loss = calculate_loss(
                             logits, targets,
                             self.config.training.loss_function,
@@ -378,7 +374,6 @@ class Trainer:
                             label_smoothing=label_smoothing
                         )
                     scaler.scale(loss).backward()
-                    
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
                         scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(
@@ -387,9 +382,12 @@ class Trainer:
                         )
                         scaler.step(self.optimizer)
                         scaler.update()
-                        self.optimizer.zero_grad(set_to_none=True)  # Más eficiente que zero_grad()
+                        self.optimizer.zero_grad(set_to_none=True)
                 else:
-                    logits = self.model(images)
+                    if isinstance(self.model, SiameseCNNClassifier):
+                        logits = self.model(images, presence_mask)
+                    else:
+                        logits = self.model(images)
                     loss = calculate_loss(
                         logits, targets,
                         self.config.training.loss_function,
@@ -397,7 +395,6 @@ class Trainer:
                         label_smoothing=label_smoothing
                     )
                     loss.backward()
-                    
                     if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(),
@@ -405,11 +402,7 @@ class Trainer:
                         )
                         self.optimizer.step()
                         self.optimizer.zero_grad(set_to_none=True)
-                
-                # Actualizar métricas (mantener en GPU)
                 total_loss += loss.detach()
-                
-                # Calcular probabilidades (mantener en GPU)
                 with torch.no_grad():
                     if logits.ndim == 2 and logits.shape[1] == 2:
                         probs = torch.softmax(logits, dim=1)[:, 1]
@@ -417,19 +410,14 @@ class Trainer:
                         probs = torch.sigmoid(logits)
                     all_predictions.append(probs)
                     all_targets.append(targets)
-                
-                # Actualizar barra de progreso
                 if batch_idx % 10 == 0 or batch_idx == n_batches - 1:
                     progress.update(task, advance=1, description=f"[cyan]Entrenando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
                 else:
                     progress.update(task, advance=1)
-        
-        # Concatenar y calcular métricas (todo en GPU)
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
         metrics['loss'] = (total_loss / n_batches).item()
-        
         return metrics
 
     def validate_epoch(self, epoch: int) -> Dict[str, float]:
@@ -440,10 +428,7 @@ class Trainer:
         all_targets = []
         threshold = getattr(self.config.training, 'threshold', 0.5)
         label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
-        
-        # Pre-calcular tamaño del dataset
         n_batches = len(self.val_loader)
-        
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=self.config.hardware.use_amp):
             with Progress(
                 SpinnerColumn(),
@@ -455,44 +440,35 @@ class Trainer:
                 transient=True
             ) as progress:
                 task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=n_batches)
-                
                 for batch_idx, batch in enumerate(self.val_loader):
-                    # Mover datos a GPU de una vez
                     images = batch['image'].to(self.device, non_blocking=True)
+                    presence_mask = batch['presence_mask'].to(self.device, non_blocking=True) if 'presence_mask' in batch else None
                     targets = batch['damaged'].to(self.device, non_blocking=True)
-                    
-                    # Forward pass con mixed precision
-                    logits = self.model(images)
+                    if isinstance(self.model, SiameseCNNClassifier):
+                        logits = self.model(images, presence_mask)
+                    else:
+                        logits = self.model(images)
                     loss = calculate_loss(
                         logits, targets,
                         self.config.training.loss_function,
                         self.config.training.class_weights,
                         label_smoothing=label_smoothing
                     )
-                    
-                    # Actualizar métricas (mantener en GPU)
                     total_loss += loss
-                    
-                    # Calcular probabilidades (mantener en GPU)
                     if logits.ndim == 2 and logits.shape[1] == 2:
                         probs = torch.softmax(logits, dim=1)[:, 1]
                     else:
                         probs = torch.sigmoid(logits)
                     all_predictions.append(probs)
                     all_targets.append(targets)
-                    
-                    # Actualizar barra de progreso
                     if batch_idx % 10 == 0 or batch_idx == n_batches - 1:
                         progress.update(task, advance=1, description=f"[magenta]Validando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
                     else:
                         progress.update(task, advance=1)
-        
-        # Concatenar y calcular métricas (todo en GPU)
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
         metrics['loss'] = (total_loss / n_batches).item()
-        
         return metrics
     
     def update_scheduler(self, val_metric: float):
@@ -700,22 +676,25 @@ class Trainer:
                 all_tgts = []
                 for batch in self.val_loader:
                     images = batch['image'].to(self.device)
+                    presence_mask = batch['presence_mask'].to(self.device) if 'presence_mask' in batch else None
                     targets = batch['damaged'].to(self.device)
-                    with torch.no_grad():
+                    if isinstance(self.model, SiameseCNNClassifier):
+                        logits = self.model(images, presence_mask)
+                    else:
                         logits = self.model(images)
-                        if logits.ndim == 2 and logits.shape[1] == 2:
-                            probs = torch.softmax(logits, dim=1)[:, 1]
-                        else:
-                            probs = torch.sigmoid(logits)
-                        all_predictions.append(logits.detach().cpu())  # Guardar logits, no probs
-                        all_tgts.append(targets.cpu())
-                        for i, t in enumerate(thresholds):
-                            preds_bin = (probs > t).float()
-                            tps[i] += ((preds_bin == 1) & (targets == 1)).sum().item()
-                            fps[i] += ((preds_bin == 1) & (targets == 0)).sum().item()
-                            fns[i] += ((preds_bin == 0) & (targets == 1)).sum().item()
-                        total_loss_val += calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=getattr(self.config.training, 'label_smoothing', 0.0)).item()
-                        n_val += 1
+                    if logits.ndim == 2 and logits.shape[1] == 2:
+                        probs = torch.softmax(logits, dim=1)[:, 1]
+                    else:
+                        probs = torch.sigmoid(logits)
+                    all_predictions.append(logits.detach().cpu())  # Guardar logits, no probs
+                    all_tgts.append(targets.cpu())
+                    for i, t in enumerate(thresholds):
+                        preds_bin = (probs > t).float()
+                        tps[i] += ((preds_bin == 1) & (targets == 1)).sum().item()
+                        fps[i] += ((preds_bin == 1) & (targets == 0)).sum().item()
+                        fns[i] += ((preds_bin == 0) & (targets == 1)).sum().item()
+                    total_loss_val += calculate_loss(logits, targets, self.config.training.loss_function, self.config.training.class_weights, label_smoothing=getattr(self.config.training, 'label_smoothing', 0.0)).item()
+                    n_val += 1
                 best_f1_epoch = 0.0
                 best_t = 0.5
                 for i, t in enumerate(thresholds):
@@ -847,6 +826,7 @@ class Trainer:
         with torch.no_grad():
             for batch in loader:
                 images = batch['image'].to(self.device)
+                presence_mask = batch['presence_mask'].to(self.device) if 'presence_mask' in batch else None
                 aug_images = [images]
                 if n_aug > 1:
                     aug_images.append(torch.flip(images, dims=[-1]))  # horizontal
@@ -854,10 +834,12 @@ class Trainer:
                     aug_images.append(torch.flip(images, dims=[-2]))  # vertical
                 if n_aug > 3:
                     aug_images.append(torch.rot90(images, k=1, dims=[-2, -1]))
-                # Si quieres más augmentaciones, añádelas aquí
                 probs = 0
                 for aug in aug_images[:n_aug]:
-                    logits = self.model(aug)
+                    if isinstance(self.model, SiameseCNNClassifier):
+                        logits = self.model(aug, presence_mask)
+                    else:
+                        logits = self.model(aug)
                     if logits.ndim == 2 and logits.shape[1] == 2:
                         probs += torch.softmax(logits, dim=1)[:, 1]
                     else:
@@ -971,6 +953,8 @@ def main():
         else:
             # Si no es pre_post, advertir
             print("[WARNING] El modelo siamese_cnn_classifier está pensado para modo pre_post (input 2*C canales)")
+        # Guardar max_channels en config.model para el backbone
+        config.model.max_channels = config.data.max_channels
     trainer = Trainer(config, use_aug=args.use_aug)
     trainer.train(resume_from=args.resume)
 

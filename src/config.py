@@ -228,9 +228,16 @@ class Config:
     
     def to_yaml(self, yaml_path: str):
         """Guardar configuración en archivo YAML."""
-        config_dict = dataclasses.asdict(self)
+        import os
+        dirpath = os.path.dirname(yaml_path)
+        if dirpath:
+            # Si el path existe y es un archivo, bórralo antes de crear el directorio
+            if os.path.isfile(dirpath):
+                os.remove(dirpath)
+            os.makedirs(dirpath, exist_ok=True)
+        import dataclasses
         with open(yaml_path, 'w') as f:
-            yaml.dump(config_dict, f, default_flow_style=False, indent=2)
+            yaml.safe_dump(dataclasses.asdict(self), f, sort_keys=False, allow_unicode=True)
     
     def save(self, output_dir: str):
         """Guardar configuración en el directorio de salida."""

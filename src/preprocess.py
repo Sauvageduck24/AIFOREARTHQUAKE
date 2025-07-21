@@ -244,12 +244,12 @@ def process_scene(scene, bbox, target_crs):
         return None
     gsd = scene.get('gsd', TARGET_GSD)
     if gsd is None or gsd <= 0 or not np.isfinite(gsd):
-        logger.warning(f"GSD inválido ({gsd}) para escena {scene['scene_id']}, usando valor por defecto {TARGET_GSD}")
+        #logger.warning(f"GSD inválido ({gsd}) para escena {scene['scene_id']}, usando valor por defecto {TARGET_GSD}")
         gsd = TARGET_GSD
     scale = gsd / TARGET_GSD
     MAX_SCALE = 10.0
     if not np.isfinite(scale) or scale <= 0:
-        logger.warning(f"Factor de escala inválido ({scale}) para escena {scene['scene_id']}, usando 1.0")
+        #logger.warning(f"Factor de escala inválido ({scale}) para escena {scene['scene_id']}, usando 1.0")
         scale = 1.0
     elif scale > MAX_SCALE:
         scale = MAX_SCALE
@@ -288,7 +288,7 @@ def process_scene(scene, bbox, target_crs):
                                 anti_aliasing=True,
                             )
                         else:
-                            logger.warning(f"Tamaño de rescalado inválido {new_size} para banda {band_name}")
+                            #logger.warning(f"Tamaño de rescalado inválido {new_size} para banda {band_name}")
                             continue
                     except Exception as e:
                         logger.warning(f"Error al rescalar banda {band_name}: {e}")

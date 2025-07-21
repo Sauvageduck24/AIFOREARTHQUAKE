@@ -1,0 +1,92 @@
+data:
+  data_root: preprocessed
+  raw_data_path: data/raw
+  processed_data_path: data/processed
+  splits_path: data/splits
+  image_size: 128
+  channels: 4
+  num_classes: 2
+  batch_size: 32
+  num_workers: 8
+  pin_memory: true
+  shuffle: true
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  split_ratio: 0.8
+  use_augmentation: true
+  augmentation_prob: 0.5
+  split: full
+  mode: pre_post
+  filter_has_data: true
+  max_channels: 3
+model:
+  model_name: siamese_cnn_classifier
+  backbone: resnet50
+  pretrained: true
+  in_channels: 3
+  out_channels: 1
+  encoder_depth: 5
+  decoder_channels:
+  - 256
+  - 128
+  - 64
+  - 32
+  - 16
+  activation: sigmoid
+  dropout: 0.1
+  attention: false
+  in_features: 1572864
+  out_features: 1
+  tile_size: 128
+  n_targets: 1
+training:
+  epochs: 2
+  learning_rate: 0.01
+  weight_decay: 0.0
+  optimizer: adamw
+  scheduler: cosine
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  warmup_epochs: 5
+  loss_function: bce_dice
+  class_weights:
+  - 1.0136687797147386
+  - 0.9866949479367528
+  val_frequency: 1
+  save_frequency: 5
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.0001
+  save_best_only: true
+  save_last: true
+hardware:
+  device: cuda
+  gpu_ids:
+  - 0
+  distributed: false
+  backend: nccl
+  world_size: 1
+  rank: 0
+  use_amp: true
+  amp_dtype: float16
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+logging:
+  experiment_name: earthquake_damage_detection
+  run_name: simple_classifier_resnet50_20250721_214730
+  log_dir: outputs/logs
+  tensorboard: true
+  wandb: false
+  wandb_project: earthquake-damage-detection
+  wandb_entity: null
+  output_dir: outputs
+  models_dir: outputs/models
+  predictions_dir: outputs/predictions
+  log_frequency: 10
+  log_images: false
+  log_images_frequency: 50
+seed: 42
+deterministic: true
+debug: false
+cudnn_benchmark: true
+cudnn_deterministic: false

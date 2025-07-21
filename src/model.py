@@ -563,30 +563,42 @@ class CNNBackbone(nn.Module):
 
 class SiameseCNNClassifier(nn.Module):
     """
-    Modelo siamés con backbone CNN compartido para pre y post imagen.
-    Entrada: [B, 2*C, H, W] (pre + post concatenados)
+    Modelo siamés mejorado con backbone CNN compartido para pre y post imagen.
+    Entrada: [B, 2*C, H, W] (pre + post concatenados), y presence_mask [B, 2*C, H, W]
     Salida: logit por tile (clasificación binaria)
     """
-    def __init__(self, in_channels, dropout=0.2, base=64):
+    def __init__(self, in_channels, dropout=0.3, base=64):
         super().__init__()
         self.c = in_channels  # canales por imagen (pre o post)
-        self.backbone = CNNBackbone(in_channels, dropout=dropout, base=base)
+        # El backbone ahora espera imagen+mask: C*2 canales por rama
+        self.backbone = CNNBackbone(in_channels * 2, dropout=dropout, base=base)
         feat_dim = self.backbone.out_dim
-        # MLP para clasificación final
+        # MLP más profundo y con BatchNorm
         self.classifier = nn.Sequential(
-            nn.Linear(feat_dim * 2, 128),
+            nn.Linear(feat_dim * 3, 256),  # 3: pre, post, abs(pre-post)
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(128, 1)  # Logit
+            nn.Linear(256, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1)  # Logit
         )
 
-    def forward(self, x):
-        # x: [B, 2*C, H, W] -> split en pre y post
+    def forward(self, x, presence_mask):
+        # x: [B, 2*C, H, W], presence_mask: [B, 2*C, H, W]
         pre = x[:, :self.c, :, :]
         post = x[:, self.c:, :, :]
-        feat_pre = self.backbone(pre)   # (B, F)
-        feat_post = self.backbone(post) # (B, F)
-        feat = torch.cat([feat_pre, feat_post], dim=1)  # (B, 2F)
+        pre_mask = presence_mask[:, :self.c, :, :]
+        post_mask = presence_mask[:, self.c:, :, :]
+        # Concatenar la máscara como canales extra
+        pre_input = torch.cat([pre, pre_mask], dim=1)   # [B, 2*C, H, W]
+        post_input = torch.cat([post, post_mask], dim=1) # [B, 2*C, H, W]
+        feat_pre = self.backbone(pre_input)   # (B, F)
+        feat_post = self.backbone(post_input) # (B, F)
+        feat_diff = torch.abs(feat_pre - feat_post)
+        feat = torch.cat([feat_pre, feat_post, feat_diff], dim=1)  # (B, 3F)
         logit = self.classifier(feat)  # (B, 1)
         return logit.squeeze(1)  # (B,)
 
@@ -619,8 +631,10 @@ def get_model(config: ModelConfig) -> nn.Module:
             dropout=getattr(config, 'dropout', 0.2)
         )
     elif config.model_name == "siamese_cnn_classifier":
+        # Usar max_channels para el backbone (canales por imagen pre o post)
+        in_channels = getattr(config, 'max_channels', 3)
         model = SiameseCNNClassifier(
-            in_channels=config.in_channels // 2,  # canales por imagen (pre o post)
+            in_channels=in_channels,
             dropout=getattr(config, 'dropout', 0.2)
         )
     elif config.model_name == "linear":
