@@ -16,32 +16,26 @@ def make_balanced_sampler(labels):
                                  replacement=True)
 
 # ---------- 2. Data augmentation específico por clase ----------
-def build_transforms(minority_class):
-    """Crea dos pipelines Albumentations:
-       - strong_aug   → se aplica a la clase minoritaria
-       - weak_aug     → se aplica a la clase mayoritaria
-    """
-    strong_aug = A.Compose([
+def build_transforms(minority_class=None):
+    """Crea un único pipeline Albumentations para todas las clases."""
+    aug = A.Compose([
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.1,
-                           scale_limit=0.15,
-                           rotate_limit=45, p=0.5),
-        A.RandomBrightnessContrast(0.2, 0.2, p=0.5),
-        # A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
-        # A.GridDistortion(p=0.2),
+        A.ShiftScaleRotate(shift_limit=0.15,
+                           scale_limit=0.2,
+                           rotate_limit=60, p=0.7),
+        A.RandomBrightnessContrast(0.3, 0.3, p=0.7),
+        A.GaussNoise(var_limit=(10.0, 80.0), p=0.4),
+        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.3),
+        A.ElasticTransform(alpha=1, sigma=50, alpha_affine=30, p=0.2),
+        A.MotionBlur(blur_limit=5, p=0.2),
+        A.MedianBlur(blur_limit=3, p=0.1),
+        #A.CLAHE(clip_limit=2.0, tile_grid_size=(8,8), p=0.1),
+        A.RandomGamma(gamma_limit=(80, 120), p=0.2),
         ToTensorV2(),
     ])
-    weak_aug = A.Compose([
-        A.HorizontalFlip(p=0.5),
-        A.RandomBrightnessContrast(0.1, 0.1, p=0.3),
-        ToTensorV2(),
-    ])
-    # Mapear índice de clase → transform correspondiente
-    tr_map = {minority_class: strong_aug,
-              1 - minority_class: weak_aug}
-    return tr_map
+    return {0: aug, 1: aug}
 
 # ---------- 3. Dataset wrapper que inyecta la aug ----------
 class AugmentedDataset(torch.utils.data.Dataset):

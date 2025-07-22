@@ -20,6 +20,7 @@ data:
   mode: pre_post
   filter_has_data: true
   max_channels: 3
+  repeat_factor: 2
 model:
   model_name: siamese_cnn_classifier
   backbone: resnet50
@@ -41,7 +42,7 @@ model:
   tile_size: 128
   n_targets: 1
 training:
-  epochs: 20
+  epochs: 2
   learning_rate: 0.001
   weight_decay: 0.0
   optimizer: adamw
@@ -73,7 +74,7 @@ hardware:
   max_grad_norm: 1.0
 logging:
   experiment_name: earthquake_damage_detection
-  run_name: simple_classifier_resnet50_20250721_225020
+  run_name: simple_classifier_resnet50_20250722_091826
   log_dir: outputs/logs
   tensorboard: true
   wandb: false

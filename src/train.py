@@ -868,7 +868,7 @@ def main():
     parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML", default="config.yaml")
     parser.add_argument("--resume", type=str, help="Ruta al checkpoint para resumir")
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
-    parser.add_argument("--epochs", type=int, help="Número de épocas", default=20)
+    parser.add_argument("--epochs", type=int, help="Número de épocas", default=2)
     parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
     parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate")
     parser.add_argument("--model", type=str, help="Nombre del modelo", default='siamese_cnn_classifier')

@@ -16,6 +16,7 @@ data:
   filter_has_data: true
   max_channels: 3     # null = todos los canales
   split_ratio: 0.8       # Proporción train/val
+  repeat_factor: 2
 
 training:
   epochs: 10

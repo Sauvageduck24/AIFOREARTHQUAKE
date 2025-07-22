@@ -54,6 +54,7 @@ class DataConfig:
     # Filtros para el nuevo sistema
     filter_has_data: bool = True  # Solo tiles con datos disponibles
     max_channels: Optional[int] = None  # Máximo número de canales a usar
+    repeat_factor: int = 2  # Número de veces que se repite el dataset de entrenamiento por época (oversampling virtual)
 
 
 @dataclass

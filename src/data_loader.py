@@ -191,6 +191,26 @@ class SubsetEarthquakeTileDataset(EarthquakeTileDataset):
         super().__init__(data_root, split, mode, filter_has_data, max_channels)
         self.meta_df = meta_subset
 
+# --- NUEVO: Dataset wrapper para repetir datos (oversampling virtual) ---
+class RepeatDataset(torch.utils.data.Dataset):
+    """
+    Dataset que repite el dataset base N veces (útil para oversampling/augmentation).
+    """
+    def __init__(self, base_dataset, repeat_factor=2):
+        self.base_dataset = base_dataset
+        self.repeat_factor = repeat_factor
+
+    def __len__(self):
+        return len(self.base_dataset) * self.repeat_factor
+
+    def __getitem__(self, idx):
+        return self.base_dataset[idx % len(self.base_dataset)]
+
+# Ejemplo de uso en get_dataloaders_aug o get_dataloaders:
+# repeat_factor = getattr(config.data, 'repeat_factor', 1)
+# if repeat_factor > 1:
+#     dataset_train_aug = RepeatDataset(dataset_train_aug, repeat_factor=repeat_factor)
+
 def custom_collate(batch):
     """Función de collate personalizada para manejar tensores de diferentes tamaños"""
     batch_out = {}
@@ -252,6 +272,7 @@ def get_dataloaders_aug(config):
     pin_memory = getattr(config.data, 'pin_memory', True)
     split_ratio = getattr(config.data, 'split_ratio', 0.8)
     seed = getattr(config, 'seed', 42)
+    repeat_factor = getattr(config.data, 'repeat_factor', 1)
 
     # Cargar dataset completo
     dataset_full = EarthquakeTileDataset(
@@ -296,6 +317,9 @@ def get_dataloaders_aug(config):
     sampler = make_balanced_sampler(labels)
     tr_map = build_transforms(minority)
     dataset_train_aug = AugmentedDataset(dataset_train, tr_map)
+    # --- Repetir el dataset si repeat_factor > 1 ---
+    if repeat_factor > 1:
+        dataset_train_aug = RepeatDataset(dataset_train_aug, repeat_factor=repeat_factor)
     train_loader = DataLoader(
         dataset_train_aug,
         batch_size=batch_size,
