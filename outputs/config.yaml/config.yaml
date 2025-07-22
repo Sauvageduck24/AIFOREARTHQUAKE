@@ -42,7 +42,7 @@ model:
   tile_size: 128
   n_targets: 1
 training:
-  epochs: 2
+  epochs: 1
   learning_rate: 0.001
   weight_decay: 0.0
   optimizer: adamw
@@ -74,7 +74,7 @@ hardware:
   max_grad_norm: 1.0
 logging:
   experiment_name: earthquake_damage_detection
-  run_name: simple_classifier_resnet50_20250722_091826
+  run_name: simple_classifier_resnet50_20250722_130429
   log_dir: outputs/logs
   tensorboard: true
   wandb: false

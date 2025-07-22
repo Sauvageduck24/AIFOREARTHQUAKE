@@ -567,11 +567,15 @@ class SiameseCNNClassifier(nn.Module):
     Entrada: [B, 2*C, H, W] (pre + post concatenados), y presence_mask [B, 2*C, H, W]
     Salida: logit por tile (clasificación binaria)
     """
-    def __init__(self, in_channels, dropout=0.3, base=64):
+    def __init__(self, in_channels, dropout=0.3, base=64, backbone_weights_path=None):
         super().__init__()
         self.c = in_channels  # canales por imagen (pre o post)
         # El backbone ahora espera imagen+mask: C*2 canales por rama
         self.backbone = CNNBackbone(in_channels * 2, dropout=dropout, base=base)
+        if backbone_weights_path is not None:
+            state_dict = torch.load(backbone_weights_path, map_location='cpu')
+            self.backbone.load_state_dict(state_dict, strict=False)
+            print(f"[INFO] Pesos del backbone cargados desde {backbone_weights_path}")
         feat_dim = self.backbone.out_dim
         # MLP más profundo y con BatchNorm
         self.classifier = nn.Sequential(
@@ -603,11 +607,12 @@ class SiameseCNNClassifier(nn.Module):
         return logit.squeeze(1)  # (B,)
 
 
-def get_model(config: ModelConfig) -> nn.Module:
+def get_model(config: ModelConfig, backbone_weights_path=None) -> nn.Module:
     """
     Crear modelo según la configuración.
     Args:
         config: Configuración del modelo
+        backbone_weights_path: ruta a pesos preentrenados para el backbone (opcional)
     Returns:
         Modelo de PyTorch
     """
@@ -633,9 +638,11 @@ def get_model(config: ModelConfig) -> nn.Module:
     elif config.model_name == "siamese_cnn_classifier":
         # Usar max_channels para el backbone (canales por imagen pre o post)
         in_channels = getattr(config, 'max_channels', 3)
+        backbone_weights_path = getattr(config, 'backbone_weights_path', None)
         model = SiameseCNNClassifier(
             in_channels=in_channels,
-            dropout=getattr(config, 'dropout', 0.2)
+            dropout=getattr(config, 'dropout', 0.2),
+            backbone_weights_path=backbone_weights_path
         )
     elif config.model_name == "linear":
         # Modelo lineal por píxel (convolución 1x1 para segmentación)

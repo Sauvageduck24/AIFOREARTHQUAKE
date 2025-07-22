@@ -39,41 +39,22 @@ def normalize_for_display(img, method='percentile'):
     img *= 255
     return img.astype(np.uint8)
 
-def create_rgb_image(data, method='standard'):
+def create_rgb_image(data, method="standard"):
     """Crear imagen RGB a partir de múltiples bandas con diferentes métodos"""
     if len(data.shape) == 3:
         # Si es (C, H, W), convertir a (H, W, C)
-        if data.shape[0] <= 3:
-            # Tomar las primeras bandas disponibles
-            rgb = data[:3, :, :].transpose(1, 2, 0)
-        else:
-            if method == 'standard':
-                # Usar red, green, blue (índices 2, 1, 0)
-                if data.shape[0] >= 4:
-                    rgb = data[[2, 1, 0], :, :].transpose(1, 2, 0)
-                else:
-                    rgb = np.stack([data[0, :, :]] * 3, axis=-1)
-            elif method == 'false_color':
-                # Combinación falsa para mejor contraste
-                if data.shape[0] >= 4:
-                    # NIR, Red, Green para vegetación
-                    rgb = data[[3, 2, 1], :, :].transpose(1, 2, 0)
-                else:
-                    rgb = np.stack([data[0, :, :]] * 3, axis=-1)
-            elif method == 'enhanced':
-                # Combinación mejorada para urbanas
-                if data.shape[0] >= 4:
-                    # Red, NIR, Blue
-                    rgb = data[[2, 3, 0], :, :].transpose(1, 2, 0)
-                else:
-                    rgb = np.stack([data[0, :, :]] * 3, axis=-1)
+        # Tomar las primeras 3 bandas para RGB
+        rgb = data[:3, :, :].transpose(1, 2, 0)
     else:
         # Si es 2D, convertir a RGB
         rgb = np.stack([data] * 3, axis=-1)
-    
+
     return rgb
 
-parser = argparse.ArgumentParser(description="Visualiza un tile pre/post de los archivos .npz generados")
+
+parser = argparse.ArgumentParser(
+    description="Visualiza un tile pre/post de los archivos .npz generados"
+)
 parser.add_argument('--tile', type=str, required=True, help='Ruta al archivo .npz del tile')
 parser.add_argument('--normalize', type=str, default='percentile', 
                    choices=['percentile', 'histogram_equalization', 'adaptive'],
@@ -111,44 +92,78 @@ print(f"Pre - min: {pre_tile.min():.6f}, max: {pre_tile.max():.6f}, mean: {pre_t
 print(f"Post - min: {post_tile.min():.6f}, max: {post_tile.max():.6f}, mean: {post_tile.mean():.6f}")
 
 # Visualizar
-fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+fig, axs = plt.subplots(2, 3, figsize=(18, 10))
 
 # Post-evento RGB
 if post_tile.size > 0:
     post_rgb = create_rgb_image(post_tile, args.rgb_method)
     post_display = normalize_for_display(post_rgb, args.normalize)
-    axs[0,0].imshow(post_display)
-    axs[0,0].set_title(f'Post-evento (RGB: {args.rgb_method}, Norm: {args.normalize})')
-    axs[0,0].axis('off')
+    axs[0, 0].imshow(post_display)
+    axs[0, 0].set_title(f"Post-evento (RGB: {args.rgb_method}, Norm: {args.normalize})")
+    axs[0, 0].axis("off")
 else:
-    axs[0,0].set_title('Post-evento (no disponible)')
-    axs[0,0].axis('off')
+    axs[0, 0].set_title("Post-evento (no disponible)")
+    axs[0, 0].axis("off")
 
 # Pre-evento RGB
 if pre_tile.size > 0:
     pre_rgb = create_rgb_image(pre_tile, args.rgb_method)
     pre_display = normalize_for_display(pre_rgb, args.normalize)
-    axs[0,1].imshow(pre_display)
-    axs[0,1].set_title(f'Pre-evento (RGB: {args.rgb_method}, Norm: {args.normalize})')
-    axs[0,1].axis('off')
+    axs[0, 1].imshow(pre_display)
+    axs[0, 1].set_title(f"Pre-evento (RGB: {args.rgb_method}, Norm: {args.normalize})")
+    axs[0, 1].axis("off")
 else:
-    axs[0,1].set_title('Pre-evento (no disponible)')
-    axs[0,1].axis('off')
+    axs[0, 1].set_title("Pre-evento (no disponible)")
+    axs[0, 1].axis("off")
+
+# Diferencia (simple)
+if pre_tile.size > 0 and post_tile.size > 0:
+    pre_rgb = create_rgb_image(pre_tile, args.rgb_method)
+    post_rgb = create_rgb_image(post_tile, args.rgb_method)
+    pre_norm = normalize_for_display(pre_rgb, args.normalize)
+    post_norm = normalize_for_display(post_rgb, args.normalize)
+    diff = np.abs(pre_norm.astype(float) - post_norm.astype(float)).astype(np.uint8)
+    axs[0, 2].imshow(diff)
+    axs[0, 2].set_title("Diferencia Absoluta")
+    axs[0, 2].axis("off")
+else:
+    axs[0, 2].set_title("Diferencia (no disponible)")
+    axs[0, 2].axis("off")
+
+
+# Máscara Post-evento
+if post_tile.shape[0] >= 4:
+    post_mask = post_tile[3, :, :]
+    axs[1, 0].imshow(post_mask, cmap="gray")
+    axs[1, 0].set_title("Máscara Post-evento")
+    axs[1, 0].axis("off")
+else:
+    axs[1, 0].set_title("Máscara Post-evento (no disp.)")
+    axs[1, 0].axis("off")
+
+# Máscara Pre-evento
+if pre_tile.shape[0] >= 4:
+    pre_mask = pre_tile[3, :, :]
+    axs[1, 1].imshow(pre_mask, cmap="gray")
+    axs[1, 1].set_title("Máscara Pre-evento")
+    axs[1, 1].axis("off")
+else:
+    axs[1, 1].set_title("Máscara Pre-evento (no disp.)")
+    axs[1, 1].axis("off")
+
 
 # Histogramas
 if post_tile.size > 0:
-    post_flat = post_tile.flatten()
-    axs[1,0].hist(post_flat[post_flat > 0], bins=50, alpha=0.7, color='blue')
-    axs[1,0].set_title('Histograma Post-evento (valores > 0)')
-    axs[1,0].set_xlabel('Valor')
-    axs[1,0].set_ylabel('Frecuencia')
-
+    post_flat = post_tile[:3, :, :].flatten()
+    axs[1, 2].hist(post_flat[post_flat > 0], bins=50, alpha=0.7, color="blue", label="Post")
 if pre_tile.size > 0:
-    pre_flat = pre_tile.flatten()
-    axs[1,1].hist(pre_flat[pre_flat > 0], bins=50, alpha=0.7, color='red')
-    axs[1,1].set_title('Histograma Pre-evento (valores > 0)')
-    axs[1,1].set_xlabel('Valor')
-    axs[1,1].set_ylabel('Frecuencia')
+    pre_flat = pre_tile[:3, :, :].flatten()
+    axs[1, 2].hist(pre_flat[pre_flat > 0], bins=50, alpha=0.7, color="red", label="Pre")
+axs[1, 2].set_title("Histograma (valores > 0)")
+axs[1, 2].set_xlabel("Valor")
+axs[1, 2].set_ylabel("Frecuencia")
+axs[1, 2].legend()
+
 
 plt.tight_layout()
-plt.show() 
+plt.show()

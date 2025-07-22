@@ -253,25 +253,33 @@ class Trainer:
         logger.info("Configurando modelo...")
         
         # Crear modelo
-        self.model = get_model(self.config.model)
+        backbone_weights_path = getattr(self.config, 'backbone_weights_path', None)
+        self.model = get_model(self.config.model, backbone_weights_path=backbone_weights_path)
         self.model = self.model.to(self.device)
+        
+        # Congelar backbone si se cargan pesos preentrenados y freeze_backbone es True
+        freeze_backbone = getattr(self.config, 'freeze_backbone', True)
+        if backbone_weights_path is not None and hasattr(self.model, 'backbone') and freeze_backbone:
+            for param in self.model.backbone.parameters():
+                param.requires_grad = False
+            print(f"[INFO] Backbone congelado (no se entrena) por tener pesos preentrenados: {backbone_weights_path}")
         
         # Configurar optimizador
         if self.config.training.optimizer == "adam":
             self.optimizer = optim.Adam(
-                self.model.parameters(),
+                filter(lambda p: p.requires_grad, self.model.parameters()),
                 lr=self.config.training.learning_rate,
                 weight_decay=self.config.training.weight_decay
             )
         elif self.config.training.optimizer == "adamw":
             self.optimizer = optim.AdamW(
-                self.model.parameters(),
+                filter(lambda p: p.requires_grad, self.model.parameters()),
                 lr=self.config.training.learning_rate,
                 weight_decay=self.config.training.weight_decay
             )
         elif self.config.training.optimizer == "sgd":
             self.optimizer = optim.SGD(
-                self.model.parameters(),
+                filter(lambda p: p.requires_grad, self.model.parameters()),
                 lr=self.config.training.learning_rate,
                 momentum=0.9,
                 weight_decay=self.config.training.weight_decay
@@ -863,12 +871,19 @@ def leave_one_event_out_cv(config):
 
 
 def main():
+    import shutil
+    import os
+    # Borrar la carpeta outputs/config.yaml si existe
+    config_yaml_dir = os.path.join('outputs', 'config.yaml')
+    if os.path.isdir(config_yaml_dir):
+        print(f"[INFO] Borrando directorio conflictivo: {config_yaml_dir}")
+        shutil.rmtree(config_yaml_dir, ignore_errors=True)
     """Función principal para ejecutar el entrenamiento."""
     parser = argparse.ArgumentParser(description="Entrenamiento de modelo de detección de daños")
     parser.add_argument("--config", type=str, help="Ruta al archivo de configuración YAML", default="config.yaml")
     parser.add_argument("--resume", type=str, help="Ruta al checkpoint para resumir")
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
-    parser.add_argument("--epochs", type=int, help="Número de épocas", default=2)
+    parser.add_argument("--epochs", type=int, help="Número de épocas", default=1)
     parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
     parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate")
     parser.add_argument("--model", type=str, help="Nombre del modelo", default='siamese_cnn_classifier')
@@ -889,6 +904,8 @@ def main():
     parser.add_argument("--use_aug", action="store_true",default=True, help="Usar data augmentation y muestreo balanceado (get_dataloaders_aug)")
     parser.add_argument("--label_smoothing", type=float, default=0.05, help="Label smoothing binario (0.0 = sin smoothing, típico 0.05)")
     parser.add_argument("--swa_start_epoch", type=int, default=None, help="Época a partir de la cual activar SWA (Stochastic Weight Averaging)")
+    parser.add_argument("--backbone_weights_path", type=str, default="outputs/models/cnnbackbone_simclr.pth", help="Ruta a los pesos preentrenados del backbone (SimCLR)")
+    parser.add_argument("--freeze_backbone", action="store_true", default=True, help="Congelar el backbone si se cargan pesos preentrenados (por defecto: True)")
     args = parser.parse_args()
     
     # Cargar configuración
@@ -933,6 +950,9 @@ def main():
         config.training.label_smoothing = args.label_smoothing
     if args.swa_start_epoch is not None:
         config.training.swa_start_epoch = args.swa_start_epoch
+    if args.backbone_weights_path is not None:
+        config.backbone_weights_path = args.backbone_weights_path
+    config.freeze_backbone = args.freeze_backbone
     
     # Crear trainer y ejecutar entrenamiento
     # --- Ajuste automático de in_channels para siamese_cnn_classifier ---
