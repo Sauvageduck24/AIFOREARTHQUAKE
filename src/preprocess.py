@@ -35,6 +35,28 @@ import fiona
 warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
 warnings.filterwarnings("ignore", 'GeoSeries.notna', UserWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in")
+
+# Mapeo de eventos a países - actualizado
+EVENT_TO_COUNTRY = {
+    "Call_919_Turkey": "Turkey", 
+    "Call_1095_Myanmar": "Myanmar", 
+    "Call_1075_China": "China",
+    "Call_920_Syria": "Syria", 
+    "Call_965_Morocco": "Morocco", 
+    "Call_970_Afghanistan": "Afghanistan"
+}
+
+# Mapeo de países a CRS - añadido desde visualizar_escenas.py
+COUNTRY_TO_CRS = {
+    "Turkey": "EPSG:32637", 
+    "Myanmar": "EPSG:32646", 
+    "China": "EPSG:32645",
+    "Syria": "EPSG:32637", 
+    "Morocco": "EPSG:32629", 
+    "Afghanistan": "EPSG:32642"
+}
+
+# Fechas de activación por defecto (fallback)
 ACTIVATION_DATES = {
     "Call_919_Turkey": datetime(2023, 2, 6, tzinfo=timezone.utc),
     "Call_1095_Myanmar": datetime(2025, 3, 23, tzinfo=timezone.utc),
@@ -59,6 +81,190 @@ P = None  # Se calculará al inicio
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger("preprocess")
+
+def _read_rgb_bands_from_separate_files(scene_path, scene_id, out_shape):
+    """Lee las bandas RGB desde archivos TIFF separados usando el JSON del satélite."""
+    try:
+        # Buscar el archivo JSON en diferentes ubicaciones posibles
+        json_path = scene_path / f"{scene_id}.json"
+        if not json_path.exists():
+            # Intentar buscar en el directorio padre si no se encuentra
+            json_path = scene_path.parent / f"{scene_id}.json"
+            if not json_path.exists():
+                return None, None
+        
+        logger.debug(f"Leyendo JSON desde: {json_path}")
+        with open(json_path, 'r') as f:
+            item_data = json.load(f)
+        
+        assets = item_data.get('assets', {})
+        logger.debug(f"Assets encontrados en JSON: {list(assets.keys())}")
+        rgb_assets = {}
+        
+        for key, asset in assets.items():
+            if key in ['red', 'green', 'blue']:
+                rgb_assets[key] = asset
+            elif 'eo:bands' in asset:
+                for band_info in asset['eo:bands']:
+                    common_name = band_info.get('common_name', '').lower()
+                    if common_name in ['red', 'green', 'blue']:
+                        rgb_assets[common_name] = asset
+                        break
+        
+        # Verificar qué bandas están disponibles
+        available_bands = {}
+        for color in ['red', 'green', 'blue']:
+            if color in rgb_assets:
+                asset = rgb_assets[color]
+                # Construir la ruta relativa desde la carpeta de la escena
+                asset_href = asset['href'].lstrip('./')
+                base_asset_path = scene_path / asset_href
+                
+                # Si la ruta no existe, intentar buscar en diferentes ubicaciones
+                if not base_asset_path.exists():
+                    possible_paths = [
+                        scene_path / "Optical_Calibration" / Path(asset_href).name,
+                        scene_path.parent / "Optical_Calibration" / Path(asset_href).name,
+                        scene_path / Path(asset_href).name,
+                    ]
+                    
+                    for possible_path in possible_paths:
+                        if possible_path.exists():
+                            base_asset_path = possible_path
+                            logger.debug(f"Archivo encontrado en ubicación alternativa: {possible_path}")
+                            break
+                
+                # Buscar archivo _aligned.tif primero
+                aligned_asset_path = base_asset_path.parent / f"{base_asset_path.stem}_aligned.tif"
+                
+                if aligned_asset_path.exists():
+                    available_bands[color] = aligned_asset_path
+                    logger.debug(f"Archivo alineado disponible para banda {color}: {aligned_asset_path.name}")
+                elif base_asset_path.exists():
+                    available_bands[color] = base_asset_path
+                    logger.debug(f"Archivo original disponible para banda {color}: {base_asset_path.name}")
+                else:
+                    logger.warning(f"No se encontró archivo para banda {color}: {base_asset_path}")
+            else:
+                logger.warning(f"No se encontró asset para banda {color}")
+        
+        # Si no tenemos al menos una banda, fallar
+        if not available_bands:
+            logger.error("No se encontraron archivos para ninguna banda RGB")
+            return None, None
+        
+        bands = []
+        transform = None
+        
+        # Intentar leer las bandas disponibles
+        for color in ['red', 'green', 'blue']:
+            if color in available_bands:
+                asset_path = available_bands[color]
+                logger.debug(f"Leyendo banda {color} desde: {asset_path}")
+                with rasterio.open(asset_path) as src:
+                    if transform is None:
+                        transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+                    band_data = src.read(1, out_shape=out_shape)
+                    logger.debug(f"Banda {color} leída exitosamente, forma: {band_data.shape}, rango: [{band_data.min():.2f}, {band_data.max():.2f}]")
+                    bands.append(band_data)
+            else:
+                # Si falta una banda, usar la primera disponible como sustituto
+                first_available = list(available_bands.keys())[0]
+                asset_path = available_bands[first_available]
+                logger.debug(f"Usando banda {first_available} como sustituto para {color} desde: {asset_path}")
+                with rasterio.open(asset_path) as src:
+                    if transform is None:
+                        transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+                    band_data = src.read(1, out_shape=out_shape)
+                    logger.debug(f"Banda sustituta {first_available} leída exitosamente, forma: {band_data.shape}")
+                    bands.append(band_data)
+        
+        return np.stack(bands, axis=-1), transform
+        
+    except Exception as e:
+        logger.error(f"Error leyendo bandas RGB: {e}")
+        return None, None
+
+def _read_rgb_bands_from_tiff(tiff_path, out_shape):
+    """Lee las bandas RGB desde un archivo TIFF multibanda."""
+    try:
+        with rasterio.open(tiff_path) as src:
+            if src.count == 1:
+                band_data = src.read(1, out_shape=out_shape)
+                img_array = np.stack([band_data, band_data, band_data], axis=-1)
+                transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+                return img_array, transform
+            
+            band_names = [desc.lower() if desc else '' for desc in src.descriptions]
+            rgb_indices = {'red': None, 'green': None, 'blue': None}
+            
+            for i, name in enumerate(band_names):
+                if any(color in name for color in ['red', 'r', 'b4', 'b04']):
+                    rgb_indices['red'] = i
+                elif any(color in name for color in ['green', 'g', 'b3', 'b03']):
+                    rgb_indices['green'] = i
+                elif any(color in name for color in ['blue', 'b', 'b2', 'b02']):
+                    rgb_indices['blue'] = i
+            
+            if all(idx is None for idx in rgb_indices.values()) and src.count >= 3:
+                rgb_indices = {'red': 0, 'green': 1, 'blue': 2}
+            
+            bands = []
+            for color in ['red', 'green', 'blue']:
+                band_idx = rgb_indices[color]
+                if band_idx is not None and band_idx < src.count:
+                    bands.append(src.read(band_idx + 1, out_shape=out_shape))
+                else:
+                    logger.warning(f"No se pudo encontrar banda {color} en {tiff_path}")
+                    return None, None
+            
+            img_array = np.stack(bands, axis=-1)
+            transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+            return img_array, transform
+            
+    except Exception as e:
+        logger.error(f"Error leyendo TIFF: {e}")
+        return None, None
+
+def _normalize_for_display(img_array):
+    """Normaliza un array para visualización usando percentiles."""
+    logger.debug(f"Normalizando imagen con forma: {img_array.shape}, tipo: {img_array.dtype}")
+    logger.debug(f"Rango original: [{img_array.min():.2f}, {img_array.max():.2f}]")
+    
+    if len(img_array.shape) == 2:
+        img_array = np.expand_dims(img_array, axis=-1)
+        logger.debug(f"Expandida a 3D, nueva forma: {img_array.shape}")
+    
+    # Manejar imágenes con 2 canales (crear un tercer canal)
+    if img_array.shape[2] == 2:
+        # Crear un tercer canal como promedio de los dos existentes
+        third_channel = np.mean(img_array, axis=2, keepdims=True)
+        img_array = np.concatenate([img_array, third_channel], axis=2)
+        logger.debug(f"Convertida de 2 a 3 canales, nueva forma: {img_array.shape}")
+    elif img_array.shape[2] == 1:
+        img_array = np.repeat(img_array, 3, axis=-1)
+        logger.debug(f"Repetida a 3 canales, nueva forma: {img_array.shape}")
+    elif img_array.shape[2] > 3:
+        # Si hay más de 3 canales, tomar solo los primeros 3
+        img_array = img_array[:, :, :3]
+        logger.debug(f"Reducida a 3 canales, nueva forma: {img_array.shape}")
+
+    img_norm = np.zeros_like(img_array, dtype=np.float32)
+    for i in range(img_array.shape[2]):
+        band = img_array[:, :, i]
+        if np.any(band > 0):
+            p2, p98 = np.percentile(band[band > 0], (2, 98))
+            logger.debug(f"Banda {i}: percentiles 2-98: [{p2:.2f}, {p98:.2f}]")
+            if p98 > p2:
+                img_norm[:, :, i] = np.clip((band - p2) / (p98 - p2), 0, 1)
+            else:
+                img_norm[:, :, i] = band.astype(np.float32) / (np.max(band) if np.max(band)>0 else 1)
+        else:
+            img_norm[:, :, i] = 0
+            logger.debug(f"Banda {i}: todos los valores son 0")
+    
+    logger.debug(f"Imagen normalizada, rango final: [{img_norm.min():.2f}, {img_norm.max():.2f}]")
+    return img_norm
 
 def find_fid_column(gdf):
     # Primero buscar columnas que empiecen con 'fid_'
@@ -126,10 +332,103 @@ def extract_date_from_name(name):
         return datetime.strptime(m.group(1), "%Y%m%d").replace(tzinfo=timezone.utc)
     return None
 
+def extract_earthquake_dates_from_collection(collection_path):
+    """Extrae las fechas de terremotos desde el collection.json y carpetas de archivos."""
+    earthquake_dates = {}
+    
+    try:
+        with open(collection_path, 'r', encoding='utf-8') as f:
+            collection_data = json.load(f)
+        
+        # Buscar fechas en los nombres de carpetas y archivos
+        training_root = collection_path.parent
+        
+        # Si estamos en una carpeta de evento específica, buscar en esa carpeta
+        if training_root.name.startswith('Call_'):
+            folders_to_check = [training_root]
+        else:
+            # Si estamos en el directorio raíz, buscar en todas las carpetas de eventos
+            folders_to_check = [folder for folder in training_root.iterdir() 
+                              if folder.is_dir() and folder.name.startswith('Call_')]
+        
+        for folder in folders_to_check:
+            if folder.is_dir() and folder.name.startswith('Call_'):
+                # Extraer país del nombre de la carpeta
+                country = EVENT_TO_COUNTRY.get(folder.name, folder.name)
+                
+                # Buscar fechas en el nombre de la carpeta (formato: 20230626)
+                date_match = re.search(r'(\d{8})', folder.name)
+                if date_match:
+                    date_str = date_match.group(1)
+                    try:
+                        earthquake_date = datetime.strptime(date_str, '%Y%m%d')
+                        earthquake_dates[country] = earthquake_date
+                        logger.info(f"Fecha de terremoto detectada para {country}: {earthquake_date.strftime('%Y-%m-%d')}")
+                        continue
+                    except ValueError:
+                        pass
+                
+                # Si no se encuentra en el nombre de la carpeta, buscar en los archivos JSON
+                json_files = list(folder.glob("*.json"))
+                for json_file in json_files:
+                    if json_file.name != "collection.json":
+                        try:
+                            with open(json_file, 'r') as f:
+                                item_data = json.load(f)
+                            
+                            # Buscar fecha en el ID del archivo (formato: 20230626)
+                            scene_id = item_data.get('id', '')
+                            date_match = re.search(r'(\d{8})', scene_id)
+                            if date_match:
+                                date_str = date_match.group(1)
+                                try:
+                                    earthquake_date = datetime.strptime(date_str, '%Y%m%d')
+                                    earthquake_dates[country] = earthquake_date
+                                    logger.info(f"Fecha de terremoto detectada para {country} desde {json_file.name}: {earthquake_date.strftime('%Y-%m-%d')}")
+                                    break
+                                except ValueError:
+                                    pass
+                            
+                            # Buscar fecha en las propiedades datetime
+                            properties = item_data.get('properties', {})
+                            datetime_str = properties.get('datetime')
+                            if datetime_str:
+                                try:
+                                    earthquake_date = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+                                    earthquake_dates[country] = earthquake_date
+                                    logger.info(f"Fecha de terremoto detectada para {country} desde propiedades: {earthquake_date.strftime('%Y-%m-%d')}")
+                                    break
+                                except ValueError:
+                                    pass
+                            
+                            # Buscar fecha en propiedades adicionales
+                            for date_key in ['start_datetime', 'end_datetime', 'created', 'updated']:
+                                if date_key in properties:
+                                    try:
+                                        earthquake_date = datetime.fromisoformat(properties[date_key].replace('Z', '+00:00'))
+                                        earthquake_dates[country] = earthquake_date
+                                        logger.info(f"Fecha de terremoto detectada para {country} desde {date_key}: {earthquake_date.strftime('%Y-%m-%d')}")
+                                        break
+                                    except ValueError:
+                                        pass
+                        except Exception as e:
+                            continue
+                            
+    except Exception as e:
+        logger.error(f"Error extrayendo fechas de terremotos: {e}")
+    
+    return earthquake_dates
+
 def get_activation_date(call_dir: Path) -> datetime | None:
-    # 1️⃣ Intenta leer collection.json
+    # 1️⃣ Intenta leer collection.json con nuevo método
     coll_json = call_dir / "collection.json"
     if coll_json.exists():
+        earthquake_dates = extract_earthquake_dates_from_collection(coll_json)
+        country = EVENT_TO_COUNTRY.get(call_dir.name, call_dir.name)
+        if country in earthquake_dates:
+            return earthquake_dates[country].replace(tzinfo=timezone.utc)
+        
+        # Fallback al método original
         with open(coll_json, "r", encoding="utf-8") as f:
             txt = f.read()
         pat = re.search(r"Date of Charter Activation[:\s]*(\d{4}-\d{2}-\d{2})", txt)
@@ -165,98 +464,340 @@ def read_gsd(item_json):
     else:
         # Validar que el GSD del JSON sea razonable
         if gsd < 0.1 or gsd > 100:  # GSD fuera del rango razonable para imágenes satelitales
-            #print(f"⚠️  GSD del JSON sospechoso: {gsd} para {item_json.parent.name}")
-            #print(f"   Estimando GSD desde el raster...")
             # Estimar desde el primer band como fallback
             calib_dir = item_json.parent / "Optical_Calibration"
             band_files = list(calib_dir.glob('r-*.tif'))
             if band_files:
                 with rasterio.open(band_files[0]) as src:
                     gsd_from_raster = abs(src.transform.a)
-                    #print(f"   GSD del raster: {gsd_from_raster}")
                     if 0.1 <= gsd_from_raster <= 100:  # Si el GSD del raster es razonable
                         gsd = gsd_from_raster
-                        #print(f"   ✅ Usando GSD del raster: {gsd}")
                     else:
-                        #print(f"   ❌ GSD del raster también sospechoso, usando valor por defecto")
                         gsd = None  # Se manejará en process_scene
     
     return gsd
 
-def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_end=None):
-    scenes = []
+def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_end=None, satellites=None):
+    """Encuentra escenas usando collection.json y metadatos actualizados."""
     training_root = Path(training_root)
-    for item_json in training_root.glob("*-calibrated/*.json"):
-        try:
-            with open(item_json, 'r') as f:
-                item = json.load(f)
-            if 'geometry' in item:
-                scene_geom = shape(item['geometry'])
-            elif 'bbox' in item:
-                scene_geom = box(*item['bbox'])
+    
+    # Procesar lista de satélites
+    if satellites is None:
+        satellites = ['wv', 'ds']
+    elif isinstance(satellites, str):
+        satellites = [s.strip().lower() for s in satellites.split(',')]
+    
+    logger.info(f"Filtrando escenas por satélites: {satellites}")
+    
+    # Buscar collection.json en diferentes ubicaciones
+    collection_path = None
+    possible_collection_paths = [
+        training_root / "collection.json",
+        training_root / "Training" / "collection.json",
+    ]
+    
+    # También buscar en cada carpeta de evento
+    for event_dir in training_root.glob("Call_*"):
+        if event_dir.is_dir():
+            possible_collection_paths.append(event_dir / "collection.json")
+    
+    for path in possible_collection_paths:
+        if path.exists():
+            collection_path = path
+            logger.info(f"Encontrado collection.json en: {collection_path}")
+            break
+    
+    if not collection_path:
+        logger.warning(f"No se encontró collection.json en ninguna ubicación esperada")
+        return []
+
+    # Extraer fechas de terremotos
+    earthquake_dates = extract_earthquake_dates_from_collection(collection_path)
+
+    with open(collection_path, 'r', encoding='utf-8') as f:
+        collection_data = json.load(f)
+
+    all_item_data = []
+    item_links = [link['href'] for link in collection_data.get('links', []) if link.get('rel') == 'item']
+    logger.info(f"Encontrados {len(item_links)} items en collection.json")
+    
+    # Si no hay items en collection.json, buscar archivos JSON directamente
+    if not item_links:
+        logger.info("No se encontraron items en collection.json, buscando archivos JSON directamente...")
+        for event_dir in training_root.glob("Call_*"):
+            if event_dir.is_dir():
+                for json_file in event_dir.glob("*-calibrated/*.json"):
+                    if json_file.name != "collection.json":
+                        try:
+                            with open(json_file, 'r', encoding='utf-8') as f:
+                                item_data = json.load(f)
+                                item_data['__item_path'] = json_file
+                                all_item_data.append(item_data)
+                        except Exception as e:
+                            logger.warning(f"Error leyendo {json_file}: {e}")
+        logger.info(f"Encontrados {len(all_item_data)} archivos JSON directamente")
+    
+    for item_href in item_links:
+        item_path = (collection_path.parent / item_href).resolve()
+        if item_path.exists():
+            try:
+                with open(item_path, 'r', encoding='utf-8') as f:
+                    item_data = json.load(f)
+                    item_data['__item_path'] = item_path
+                    all_item_data.append(item_data)
+            except Exception as e:
+                logger.error(f"Error leyendo item JSON {item_path}: {e}")
+        else:
+            logger.warning(f"Item no encontrado: {item_path}")
+
+    # Agrupar escenas MS y PN del mismo satélite
+    grouped_scenes = {}
+    logger.info(f"Agrupando {len(all_item_data)} items...")
+    
+    for item in all_item_data:
+        scene_id = item.get('id', '')
+        base_name = scene_id
+        
+        # Mejor lógica de agrupamiento
+        if 'WV03N28_549166E087' in scene_id:
+            base_name = 'WV03N28_549166E087'
+        else:
+            if re.search(r"MS\d{2}", scene_id):
+                base_name = scene_id.split('_MS')[0]
+            elif re.search(r"PN\d{2}", scene_id):
+                base_name = scene_id.split('_PN')[0]
+            if base_name.endswith('-calibrated'):
+                base_name = base_name[:-11]
+        
+        if base_name not in grouped_scenes:
+            grouped_scenes[base_name] = {}
+        
+        if re.search(r"MS\d{2}", scene_id):
+            grouped_scenes[base_name]['MS'] = item
+        elif re.search(r"PN\d{2}", scene_id):
+            grouped_scenes[base_name]['PN'] = item
+        else:
+            grouped_scenes[base_name]['OTRO'] = item
+
+    # Procesar escenas agrupadas
+    final_items_to_process = []
+    for base_name, items in grouped_scenes.items():
+        is_worldview = 'wv' in base_name.lower() or 'worldview' in base_name.lower()
+        if is_worldview:
+            if 'MS' in items:
+                final_items_to_process.append(items['MS'])
             else:
+                logger.warning(f"No se encontró escena MS para WorldView {base_name}")
+        else:
+            final_items_to_process.extend(items.values())
+
+    scenes = []
+    for item_data in final_items_to_process:
+        try:
+            scene_id = item_data.get('id')
+            properties = item_data.get('properties', {})
+            assets = item_data.get('assets', {})
+            item_path = item_data['__item_path']
+
+            scene_date_str = properties.get('datetime')
+            scene_date = datetime.fromisoformat(scene_date_str.replace('Z', '+00:00')) if scene_date_str else None
+
+            # Filtrar por satélite
+            scene_id_lower = scene_id.lower()
+            platform = properties.get('platform', '').lower()
+            
+            # Mapeo de abreviaciones de satélites a patrones de búsqueda
+            satellite_patterns = {
+                'wv': ['wv', 'worldview', 'world view'],
+                'ds': ['ds_phr', 'ds-phr', 'pleiades', 'pleiade'],
+                'pleiades': ['pleiades', 'pleiade', 'ds_phr', 'ds-phr'],
+                'geoeye': ['geoeye', 'geo eye', 'ge'],
+                'ge': ['geoeye', 'geo eye', 'ge']
+            }
+            
+            # Verificar si la escena corresponde a alguno de los satélites solicitados
+            satellite_match = False
+            for satellite in satellites:
+                patterns = satellite_patterns.get(satellite, [satellite])
+                for pattern in patterns:
+                    if pattern in scene_id_lower or pattern in platform:
+                        satellite_match = True
+                        logger.debug(f"Escena {scene_id} coincide con satélite '{satellite}' (patrón: {pattern})")
+                        break
+                if satellite_match:
+                    break
+            
+            if not satellite_match:
+                logger.debug(f"Escena {scene_id} descartada - no coincide con satélites solicitados: {satellites}")
                 continue
+
+            # Buscar overview asset con mejor lógica
+            overview_asset = None
+            overview_path = None
+            
+            # Priorizar assets específicos
+            for key, asset in assets.items():
+                if any(name in key.lower() for name in ['overview', 'visual', 'rgb', 'natural']) and 'href' in asset:
+                    overview_asset = asset
+                    break
+            
+            # Si no se encuentra, buscar cualquier asset con roles visual
+            if not overview_asset:
+                for key, asset in assets.items():
+                    if 'visual' in asset.get('roles', []) and 'href' in asset:
+                        overview_asset = asset
+                        break
+            
+            # Si aún no se encuentra, buscar cualquier asset con href
+            if not overview_asset:
+                for key, asset in assets.items():
+                    if 'href' in asset and not key.startswith('_'):
+                        overview_asset = asset
+                        break
+            
+            if not overview_asset:
+                logger.warning(f"No se encontró asset de overview para {scene_id}")
+                continue
+
+            # Construir la ruta de la escena
+            scene_folder = item_path.parent
+            asset_href = overview_asset['href']
+            asset_filename = Path(asset_href).name
+            asset_stem = Path(asset_href).stem
+            asset_suffix = Path(asset_href).suffix
+            
+            # Crear nombres de archivo con y sin "_aligned"
+            aligned_filename = f"{asset_stem}_aligned{asset_suffix}"
+            
+            # Buscar archivos priorizando _aligned
+            possible_base_paths = [
+                scene_folder / asset_href,
+                scene_folder / asset_filename,
+                scene_folder / "Optical_Calibration" / asset_filename,
+            ]
+            
+            overview_path = None
+            
+            # Primero buscar versiones _aligned
+            for base_path in possible_base_paths:
+                aligned_path = base_path.parent / aligned_filename
+                if aligned_path.exists():
+                    overview_path = aligned_path.resolve()
+                    logger.debug(f"Archivo alineado encontrado: {overview_path}")
+                    break
+            
+            # Si no se encuentra _aligned, buscar archivos originales
+            if overview_path is None:
+                for possible_path in possible_base_paths:
+                    if possible_path.exists():
+                        overview_path = possible_path.resolve()
+                        break
+            
+            if overview_path is None:
+                logger.warning(f"No se encontró archivo para {scene_id}")
+                continue
+
+            # Determinar el path de la escena
+            if "Optical_Calibration" in str(overview_path):
+                scene_path = overview_path.parent.parent
+            else:
+                scene_path = overview_path.parent
+
+            # Extraer información geoespacial
+            scene_geom = None
+            scene_crs = None
+            scene_gsd = None
+            
+            try:
+                with rasterio.open(overview_path) as src:
+                    scene_crs = str(src.crs) if src.crs else None
+                    if src.transform:
+                        scene_gsd = abs(src.transform[0])
+                    
+                    bounds = src.bounds
+                    scene_geom = box(bounds.left, bounds.bottom, bounds.right, bounds.top)
+                    
+                    # Reprojectar a WGS84 si es necesario
+                    if src.crs and src.crs != 'EPSG:4326':
+                        try:
+                            transformer = Transformer.from_crs(src.crs, 'EPSG:4326', always_xy=True)
+                            scene_geom = shapely.ops.transform(transformer.transform, scene_geom)
+                        except Exception as e:
+                            logger.warning(f"Error reproyectando geometría: {e}")
+                    
+            except Exception as e:
+                logger.warning(f"Error extrayendo información del TIFF {overview_path}: {e}")
+                scene_geom = shape(item_data['geometry']) if 'geometry' in item_data else None
+                scene_crs = f"EPSG:{properties['proj:epsg']}" if properties.get('proj:epsg') is not None else None
+                scene_gsd = properties.get('gsd')
+
+            # Verificar intersección con AOI
             if not aoi_geom.intersects(scene_geom):
                 continue
-            calib_dir = item_json.parent / "Optical_Calibration"
+
+            # Leer bandas con soporte para archivos _aligned
+            calib_dir = scene_path / "Optical_Calibration"
             if not calib_dir.exists():
                 continue
+                
             bands = {}
             for band_file in calib_dir.glob("r-*.tif"):
                 band_name = band_file.stem.split('-')[-1]
-                bands[band_name] = band_file
+                
+                # Buscar versión _aligned primero
+                aligned_band_file = band_file.parent / f"{band_file.stem}_aligned.tif"
+                if aligned_band_file.exists():
+                    bands[band_name] = aligned_band_file
+                    logger.debug(f"Usando banda alineada: {aligned_band_file.name}")
+                else:
+                    bands[band_name] = band_file
+
             # Añadir pan si existe
             pan_file = calib_dir / "r-pan.tif"
-            if pan_file.exists():
+            aligned_pan_file = calib_dir / "r-pan_aligned.tif"
+            if aligned_pan_file.exists():
+                bands['pan'] = aligned_pan_file
+            elif pan_file.exists():
                 bands['pan'] = pan_file
-            scene_date = item.get('properties', {}).get('datetime')
-            if scene_date:
-                try:
-                    scene_date = datetime.fromisoformat(scene_date.replace('Z', '+00:00'))
-                except:
-                    scene_date = extract_date_from_name(item_json.stem)
+
             # Filter by temporal interval
             if interval_start and interval_end and scene_date:
-                # Aplicar filtro de inicio estricto
                 if scene_date < interval_start:
                     continue
                 
-                # Aplicar filtro de fin con margen configurable
                 if scene_date > interval_end + timedelta(hours=MAX_EXTENT_OVERLAP_HRS):
-                    logger.warning(f"{item_json.parent.name} fuera de intervalo "
+                    logger.warning(f"{scene_id} fuera de intervalo "
                                  f"({scene_date} > {interval_end})  — descartado")
                     continue
                 elif scene_date > interval_end:
                     hours_over = (scene_date - interval_end).total_seconds() / 3600
-                    logger.info(f"{item_json.parent.name} {scene_date} a {hours_over:.1f} h "
+                    logger.info(f"{scene_id} {scene_date} a {hours_over:.1f} h "
                                f"del límite; lo acepto por margen +{MAX_EXTENT_OVERLAP_HRS} h")
-            # Read GSD
-            gsd = read_gsd(item_json)
-            if gsd:
-                logger.debug(f"GSD para escena {item_json.parent.name}: {gsd} m/px")
-            
-            properties = item.get('properties', {})
-            scene = {
-                'scene_id': item_json.parent.name,
+
+            scene_info = {
+                'scene_id': scene_id,
                 'date': scene_date,
                 'geometry': scene_geom,
-                'path': item_json.parent,
+                'path': scene_path,
                 'bands': bands,
-                'gsd': gsd,
+                'gsd': scene_gsd,
                 'cloud_cover': properties.get('eo:cloud_cover'),
-                'sat:off_nadir': properties.get('sat:off_nadir')
+                'sat:off_nadir': properties.get('sat:off_nadir'),
+                'earthquake_dates': earthquake_dates
             }
-            logger.debug(f"Scene structure: {scene}")
-            # Validate scene structure before appending
-            if isinstance(scene, dict) and 'date' in scene and 'geometry' in scene:
-                scenes.append(scene)
-            else:
-                logger.warning(f"Invalid scene structure: {scene}")
+            
+            scenes.append(scene_info)
+            logger.info(f"Escena añadida: {scene_id} con {len(bands)} bandas")
+            
         except Exception as e:
-            logger.warning(f"Error procesando {item_json}: {e}")
+            logger.warning(f"Error procesando escena {item_data.get('id', 'unknown')}: {e}")
+            continue
+    
+    logger.info(f"Total de escenas procesadas: {len(scenes)}")
     return scenes
 
 def select_best_scenes(scenes, activation_date):
+    """Selecciona las mejores escenas pre y post-terremoto basándose en fecha, cobertura de nubes y ángulo off-nadir."""
     pre_scenes = []
     post_scenes = []
     for scene in scenes:
@@ -268,10 +809,40 @@ def select_best_scenes(scenes, activation_date):
             pre_scenes.append(scene)
         else:
             post_scenes.append(scene)
-    pre_scenes.sort(key=lambda x: abs(activation_date - x['date']))
-    post_scenes.sort(key=lambda x: abs(activation_date - x['date']))
+    
+    # Función de scoring que considera múltiples factores
+    def score_scene(scene, ref_date):
+        """Calcula un score para la escena basado en múltiples factores."""
+        temporal_dist = abs(ref_date - scene['date']).total_seconds() / 3600  # horas
+        cloud_cover = scene.get('cloud_cover')
+        off_nadir = scene.get('sat:off_nadir')
+        
+        # Manejar valores None y normalizar factores (valores más bajos son mejores)
+        temporal_score = temporal_dist / 24  # Normalizar por días
+        cloud_score = (cloud_cover / 100) if cloud_cover is not None else 0.5  # 50% por defecto
+        nadir_score = (off_nadir / 45) if off_nadir is not None else 0.67  # 30° por defecto normalizado
+        
+        # Peso combinado (temporal es más importante)
+        total_score = (temporal_score * 0.6) + (cloud_score * 0.25) + (nadir_score * 0.15)
+        return total_score
+    
+    # Ordenar por score (mejor score = menor valor)
+    pre_scenes.sort(key=lambda x: score_scene(x, activation_date))
+    post_scenes.sort(key=lambda x: score_scene(x, activation_date))
+    
     pre_scene = pre_scenes[0] if pre_scenes else None
     post_scene = post_scenes[0] if post_scenes else None
+    
+    # Log de selección para debugging
+    if pre_scene:
+        logger.info(f"Mejor escena PRE seleccionada: {pre_scene['scene_id']} "
+                   f"(fecha: {pre_scene['date']}, nubes: {pre_scene.get('cloud_cover', 'N/A')}%, "
+                   f"off-nadir: {pre_scene.get('sat:off_nadir', 'N/A')}°)")
+    if post_scene:
+        logger.info(f"Mejor escena POST seleccionada: {post_scene['scene_id']} "
+                   f"(fecha: {post_scene['date']}, nubes: {post_scene.get('cloud_cover', 'N/A')}%, "
+                   f"off-nadir: {post_scene.get('sat:off_nadir', 'N/A')}°)")
+    
     if not pre_scene and not post_scene:
         return None, None
     return pre_scene, post_scene
@@ -383,12 +954,10 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
     
     # Detectar GSD extremadamente pequeño o grande que causa problemas
     if gsd < 0.1:
-        #print(f"⚠️  GSD demasiado pequeño: {gsd} para escena {scene['scene_id']}")
-        #print(f"   Probable error en metadatos. Forzando a TARGET_GSD = {TARGET_GSD}")
+        logger.warning(f"GSD demasiado pequeño: {gsd} para escena {scene['scene_id']}, usando TARGET_GSD = {TARGET_GSD}")
         gsd = TARGET_GSD
     elif gsd > 100:
-        #print(f"⚠️  GSD demasiado grande: {gsd} para escena {scene['scene_id']}")
-        #print(f"   Probable error en metadatos. Forzando a TARGET_GSD = {TARGET_GSD}")
+        logger.warning(f"GSD demasiado grande: {gsd} para escena {scene['scene_id']}, usando TARGET_GSD = {TARGET_GSD}")
         gsd = TARGET_GSD
     
     tgt_gsd = TARGET_GSD
@@ -409,8 +978,7 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
     
     # Validación adicional para scale muy pequeño que podría causar dimensiones 0
     if scale < 0.001:  # Si el scale es menor a 0.001, es prácticamente 0
-        #print(f"⚠️  Scale extremadamente pequeño detectado: {scale:.10f}")
-        #print(f"   Forzando scale = 1.0 para evitar dimensiones inválidas")
+        logger.warning(f"Scale extremadamente pequeño detectado: {scale:.10f} para escena {scene['scene_id']}, forzando scale = 1.0")
         scale = 1.0
     
     band_arrays = []
@@ -438,7 +1006,7 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
                 
                 data = src.read(1, window=win, boundless=True, fill_value=0)
                 if data.size == 0:
-                    print(f"❌ Datos vacíos para banda {band_name} en escena {scene['scene_id']}")
+                    logger.warning(f"Datos vacíos para banda {band_name} en escena {scene['scene_id']}")
                     continue
 
                 if mask is None:
@@ -463,12 +1031,12 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
 
                     # Validar que mask_full no esté vacía
                     if mask_full.size == 0 or mask_full.shape[0] == 0 or mask_full.shape[1] == 0:
-                        print(f"❌ Máscara vacía para banda {band_name} en escena {scene['scene_id']}")
+                        logger.warning(f"Máscara vacía para banda {band_name} en escena {scene['scene_id']}")
                         continue
 
                     # Validar que data tenga dimensiones válidas antes de calcular target_h/target_w
                     if data.shape[0] == 0 or data.shape[1] == 0:
-                        print(f"❌ Datos con dimensiones inválidas {data.shape} para banda {band_name} en escena {scene['scene_id']}")
+                        logger.warning(f"Datos con dimensiones inválidas {data.shape} para banda {band_name} en escena {scene['scene_id']}")
                         continue
 
                     # Re-muestrear la máscara con el MISMO pipeline que el RGB
@@ -477,13 +1045,13 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
                     
                     # Validar que las dimensiones objetivo sean válidas
                     if target_h <= 0 or target_w <= 0:
-                        print(f"❌ Dimensiones objetivo inválidas {target_h}x{target_w} para banda {band_name} en escena {scene['scene_id']}")
+                        logger.warning(f"Dimensiones objetivo inválidas {target_h}x{target_w} para banda {band_name} en escena {scene['scene_id']}")
                         continue
 
                     if scale != 1.0:
                         # Validar dimensiones antes de resize
                         if target_h <= 0 or target_w <= 0:
-                            print(f"❌ Dimensiones inválidas para resize: {target_h}x{target_w}")
+                            logger.warning(f"Dimensiones inválidas para resize: {target_h}x{target_w}")
                             continue
                         mask_full = resize(
                             mask_full,
@@ -496,7 +1064,7 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
 
                     # Validar dimensiones antes de cv2.resize
                     if mask_full.size == 0 or mask_full.shape[0] == 0 or mask_full.shape[1] == 0:
-                        print(f"❌ Máscara vacía después de resize para banda {band_name}")
+                        logger.warning(f"Máscara vacía después de resize para banda {band_name}")
                         continue
 
                     mask = cv2.resize(
@@ -507,7 +1075,7 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
 
                 # Validar que data no esté vacía
                 if data.size == 0 or data.shape[0] == 0 or data.shape[1] == 0:
-                    print(f"❌ Datos vacíos para banda {band_name} antes del resize")
+                    logger.warning(f"Datos vacíos para banda {band_name} antes del resize")
                     continue
                 
                 # --- Remuestreo según escala ---
@@ -592,8 +1160,10 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
     # Apilar máscara después de RGB
     rgb_mask = np.concatenate([rgb, mask[..., None]], axis=-1)
 
-    # Índices de bandas que NO son red/green/blue
-    extra_idx = [i for i, b in enumerate(band_names) if b not in desired_order]
+    # Índices de bandas que NO son red/green/blue/pan
+    # Incluir pan en las bandas extra ya que tiene alta resolución
+    extra_bands = ["pan", "nir", "swir1", "swir2", "coastal", "yellow", "rededge"]
+    extra_idx = [i for i, b in enumerate(band_names) if b not in desired_order and b in extra_bands]
 
     if extra_idx:
         extra_arrays = full_stack[..., extra_idx]  # <- del stack original
@@ -609,45 +1179,7 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
         return None
 
 
-def align_patch(pre: np.ndarray, post: np.ndarray, max_shift: int = 8):
-    """
-    Calcula el desplazamiento sub-pixel entre post y pre (RGB uint16/float32
-    ya normalizados, shape (H,W,3)).
-    Devuelve pre_align, (shift_y, shift_x). Si el desplazamiento estimado
-    es mayor que max_shift px se devuelve el array original
-    (no shift aplicado) y shift=(0,0).
-    """
-    try:
-        # skimage mira canales (H,W) → pasamos luminancia aproximada
-        ref = post[..., :3].mean(axis=2)
-        mov = pre[..., :3].mean(axis=2)
-        
-        # Validar que las imágenes no estén vacías
-        ref_valid = np.any(ref > 0) and np.isfinite(ref).all()
-        mov_valid = np.any(mov > 0) and np.isfinite(mov).all()
-        
-        if not ref_valid or not mov_valid:
-            logger.debug(f"align_patch: imagen inválida - ref_valid={ref_valid}, mov_valid={mov_valid}")
-            return pre, (0.0, 0.0)
-        
-        # Verificar que las imágenes tienen varianza suficiente
-        ref_var = np.var(ref)
-        mov_var = np.var(mov)
-        if ref_var < 1e-6 or mov_var < 1e-6:
-            logger.debug(f"align_patch: varianza insuficiente - ref_var={ref_var:.2e}, mov_var={mov_var:.2e}")
-            return pre, (0.0, 0.0)
-        
-        shift_est, error, _ = phase_cross_correlation(ref, mov, upsample_factor=10)
-        dy, dx = shift_est  # (row, col)
-        if np.hypot(dy, dx) > max_shift:
-            return pre, (0.0, 0.0)
-        pre_aligned = ndi_shift(
-            pre, shift=(dy, dx, 0), order=1, mode="nearest", cval=0
-        )
-        return pre_aligned, (float(dy), float(dx))
-    except Exception as e:
-        logger.warning(f"align_patch failed: {e}")
-        return pre, (0.0, 0.0)
+
 
 
 def process_tile_worker(args):
@@ -803,17 +1335,8 @@ def process_tile(building, scenes, crs, output_dir, fid, damage_label):
         else None
     )
 
+    # Sin alineación entre escenas pre/post
     shift_xy = (0.0, 0.0)
-    if pre_data is not None and post_data is not None:
-        # Transpose from (C, H, W) to (H, W, C) for alignment
-        pre_data_hwc = pre_data.transpose(1, 2, 0)
-        post_data_hwc = post_data.transpose(1, 2, 0)
-
-        aligned_pre_hwc, shift_xy = align_patch(pre_data_hwc, post_data_hwc)
-
-        # Transpose back to (C, H, W) for saving
-        pre_data = aligned_pre_hwc.transpose(2, 0, 1)
-        logger.debug(f"fid={fid}  shift={shift_xy}")
 
     if pre_data is None:
         #logger.warning(f"FID {fid}: PRE data es None - escena seleccionada: {pre_scene['scene_id'] if pre_scene else 'None'}")
@@ -843,8 +1366,7 @@ def process_tile(building, scenes, crs, output_dir, fid, damage_label):
         shift_y=shift_xy[0],
     )
 
-
-def process_gpkg(gpkg_path, training_root, output_root, split):
+def process_gpkg(gpkg_path, training_root, output_root, split, max_workers=12, satellites=None):
     logger.info(f"Procesando {gpkg_path}")
     # Extraer nombre único de área/ciudad del archivo GPKG
     city_area = gpkg_path.stem.replace('_Training', '').replace('_training', '').replace('_Testing', '').replace('_testing', '').lower()
@@ -892,10 +1414,12 @@ def process_gpkg(gpkg_path, training_root, output_root, split):
             logger.warning(f"Error leyendo intervalo temporal en {coll_json}: {e}")
     else:
         logger.warning(f"No se encontró collection.json en {call_dir}")
-    scenes = find_scenes_for_aoi(aoi_geom_wgs, call_dir, interval_start, interval_end)
+    scenes = find_scenes_for_aoi(aoi_geom_wgs, call_dir, interval_start, interval_end, satellites)
     logger.info(f"Escenas encontradas: {len(scenes)}")
     if not scenes:
         logger.warning(f"No se encontraron escenas para {gpkg_path}")
+        logger.info(f"Call directory: {call_dir}")
+        logger.info(f"AOI geometry bounds: {aoi_geom_wgs.bounds}")
         return []
     
     # Seleccionar las mejores escenas globales para mostrar fechas de referencia
@@ -949,7 +1473,7 @@ def process_gpkg(gpkg_path, training_root, output_root, split):
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-        with ProcessPoolExecutor(max_workers=12) as executor:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
             try:
                 for meta in tqdm(executor.map(process_tile_worker, tasks, chunksize=128), 
                                total=len(tasks), 
@@ -989,12 +1513,34 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--limit', type=int, default=None, help='Limitar número de GPKGs a procesar')
     parser.add_argument('--loglevel', type=str, default='INFO', help='Nivel de logging (DEBUG, INFO, WARNING)')
+    parser.add_argument('--data-root', type=str, default='data/international-charter-eo4ai-etq-challenge', 
+                       help='Ruta al directorio raíz de datos')
+    parser.add_argument('--output-dir', type=str, default='preprocessed', 
+                       help='Directorio de salida para datos preprocesados')
+    parser.add_argument('--tile-size', type=int, default=224, 
+                       help='Tamaño de los tiles de salida')
+    parser.add_argument('--buffer-meters', type=int, default=200, 
+                       help='Buffer en metros alrededor de cada edificio')
+    parser.add_argument('--max-workers', type=int, default=12, 
+                       help='Número máximo de workers para procesamiento paralelo')
+    parser.add_argument('--satellites', type=str, default='wv,ds', 
+                       help='Satélites a usar (separados por coma). Opciones: wv,ds,pleiades,geoeye,ge. Por defecto: wv,ds')
     args = parser.parse_args()
     logger.setLevel(getattr(logging, args.loglevel.upper(), logging.INFO))
-    output_root = Path("preprocessed")
+    
+    # Mostrar información sobre los satélites seleccionados
+    satellites_list = [s.strip().lower() for s in args.satellites.split(',')]
+    logger.info(f"Satélites seleccionados: {satellites_list}")
+    
+    # Actualizar variables globales con argumentos
+    global TILE_SIZE, BUFFER_METERS
+    TILE_SIZE = args.tile_size
+    BUFFER_METERS = args.buffer_meters
+    
+    output_root = Path(args.output_dir)
     if output_root.exists() and output_root.is_dir():
         shutil.rmtree(output_root)
-    data_root = Path("data/international-charter-eo4ai-etq-challenge")
+    data_root = Path(args.data_root)
     training_annotations = data_root / "Training" / "Annotations"
     training_data = data_root / "Training"
     output_root.mkdir(exist_ok=True)
@@ -1024,7 +1570,7 @@ def main():
             split = 'test'
         else:
             split = 'unknown'
-        meta = process_gpkg(gpkg_path, training_data, output_root, split)
+        meta = process_gpkg(gpkg_path, training_data, output_root, split, args.max_workers, args.satellites)
         all_meta.extend(meta)
     meta_df = pd.DataFrame(
         all_meta,
