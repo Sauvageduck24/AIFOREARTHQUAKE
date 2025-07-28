@@ -10,7 +10,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-data/
+# data/ - Commented out to allow data/imgs/ to be tracked
+# data/
 
 # C extensions
 *.so
@@ -232,6 +233,10 @@ wandb/
 *.bmp
 *.gif
 *.svg
+# Keep documentation images
+!data/imgs/*.png
+!data/imgs/*.jpg
+!data/imgs/*.jpeg
 
 # Video files
 *.mp4
@@ -257,6 +262,11 @@ data/splits/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/splits/.gitkeep
+# Keep documentation images directory
+!data/imgs/
+
+# Never upload the challenge dataset
+data/international-charter-eo4ai-etq-challenge/
 
 # Output directories (keep structure but ignore content)
 outputs/logs/*
