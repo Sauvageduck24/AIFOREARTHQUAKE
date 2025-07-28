@@ -16,23 +16,26 @@ Desarrollar modelos de IA capaces de identificar automáticamente edificios dañ
 
 La siguiente imagen muestra la estructura general del repositorio:
 
-![Estructura del proyecto](estructura.jpg)
+![Estructura del proyecto](data/imgs/estructura.jpg)
 
 También se detalla a continuación:
 
 ```
 AIFOREARTHQUAKE/
 ├── data/                   # Datasets locales y preprocesados
-├── notebooks/              # Jupyter notebooks para exploración
+│   └── imgs/              # Imágenes de documentación
+├── configs/               # Configuraciones de experimentos
 ├── src/                    # Código fuente principal
 │   ├── data_loader.py      # Carga de datos y DataLoaders
 │   ├── transforms.py       # Transformaciones y aumentos
 │   ├── model.py            # Definición de modelos
 │   ├── train.py            # Entrenamiento y validación
 │   ├── utils.py            # Utilidades y métricas
-│   └── config.py           # Configuración del experimento
+│   ├── config.py           # Configuración del experimento
+│   └── preprocess.py       # Preprocesamiento de datos
 ├── outputs/                # Modelos, logs y predicciones
-├── scripts/                # Scripts de ejecución
+├── preprocessed/           # Datos preprocesados
+├── proof_scripts/          # Scripts de prueba y análisis
 ├── requirements.txt        # Dependencias
 └── README.md               # Este archivo
 ```
@@ -215,7 +218,7 @@ Para más detalles, consulta el código fuente de [`src/data_loader.py`](src/dat
 
 El siguiente diagrama muestra cómo están organizados los datos antes y después de ejecutar el preprocesamiento:
 
-![Estructura del dataset](dataset.jpg)
+![Estructura del dataset](data/imgs/dataset.jpg)
 
 ### Descripción del flujo de datos
 
@@ -245,55 +248,76 @@ El siguiente diagrama muestra cómo están organizados los datos antes y despué
 
 Para más detalles, consulta el código fuente de `preprocess.py` y el ejemplo de salida en la carpeta `data/preprocessed/`.
 
+## 🔍 Visualización de Resultados
+
+El proyecto incluye herramientas de visualización para analizar los resultados del modelo:
+
+### Comparación de Escalas
+- **Vista cercana:** ![Vista cercana](data/imgs/Figure_1_cerca.png) - Detalle de predicciones a nivel de edificio
+- **Vista lejana:** ![Vista lejana](data/imgs/Figure_1_lejos.png) - Vista general del área afectada
+
+Estas visualizaciones permiten evaluar la calidad de las predicciones tanto a nivel local como regional.
+
 ## 🏗️ Entrenamiento
 
 ### Entrenamiento Básico
 ```bash
-python scripts/train.py --config configs/baseline.yaml
+python src/train.py --config configs/baseline.yaml
 ```
 
 ### Entrenamiento Distribuido (DDP)
 ```bash
-python -m torch.distributed.launch --nproc_per_node=4 scripts/train.py --config configs/baseline.yaml --distributed
+python -m torch.distributed.launch --nproc_per_node=4 src/train.py --config configs/baseline.yaml --distributed
 ```
 
 ### Entrenamiento con Múltiples Seeds
 ```bash
-python scripts/train_multiple_seeds.py --config configs/baseline.yaml --seeds 42 123 456
+python src/train.py --config configs/baseline.yaml --seed 42
 ```
 
 ## 🔍 Evaluación
 
 ```bash
-python scripts/evaluate.py --model_path outputs/models/best_model.pth --data_path data/processed/test
+python src/test.py --config configs/baseline.yaml --model_path outputs/models/best_model.pth
 ```
 
 ## 📈 Predicción
 
 ```bash
-python scripts/predict.py --model_path outputs/models/best_model.pth --input_path data/raw/new_scene --output_path outputs/predictions
+python src/test.py --config configs/baseline.yaml --model_path outputs/models/best_model.pth --predict_only
 ```
 
 ## 📋 Configuración
 
-El archivo `src/config.py` contiene todos los parámetros configurables:
+El proyecto utiliza archivos YAML para la configuración de experimentos:
 
+- **`configs/baseline.yaml`**: Configuración base
+- **`configs/unet_resnet50.yaml`**: UNet con ResNet-50
+- **`configs/segmentation_transformer.yaml`**: Transformer para segmentación
+
+Cada configuración incluye:
 - **Modelo**: Arquitectura, backbone, hiperparámetros
 - **Datos**: Rutas, transformaciones, batch size
 - **Entrenamiento**: Optimizador, learning rate, epochs
 - **Hardware**: GPU, workers, distributed training
 
-## 🧪 Experimentos
+## 🧪 Experimentos y Análisis
 
-### Notebooks de Exploración
-- `notebooks/01_data_exploration.ipynb`: Análisis exploratorio de datos
-- `notebooks/02_model_prototyping.ipynb`: Prototipado de modelos
-- `notebooks/03_results_analysis.ipynb`: Análisis de resultados
+### Scripts de Prueba y Análisis
+El directorio `proof_scripts/` contiene scripts útiles para análisis y depuración:
 
-### Configuraciones Predefinidas
-- `configs/baseline.yaml`: Configuración base
-- `configs/unet_resnet50.yaml`: UNet con ResNet-50
-- `configs/segmentation_transformer.yaml`: Transformer para segmentación
+- `analyze_example_submission.py`: Análisis de la estructura de submission
+- `analyze_npz_channels.py`: Análisis de canales en archivos NPZ
+- `calc_max_fids_per_tile.py`: Cálculo de FIDs por tile
+- `check_band_assets.py`: Verificación de assets de bandas
+- `check_tiles.py`: Verificación de tiles generados
+- `debug_adiyaman.py`: Depuración específica para Adiyaman
+- `evaluate.py`: Evaluación de modelos
+- `list_image_dates.py`: Listado de fechas de imágenes
+- `test_single_tile.py`: Prueba de un tile individual
+- `view_augmented_batch.py`: Visualización de batches aumentados
+- `view_gpkg_content.py`: Visualización de contenido GPKG
+- `view_prepost_tile.py`: Visualización de tiles pre/post
 
 ## 📊 Métricas
 
@@ -312,6 +336,8 @@ El proyecto implementa las siguientes métricas:
 - ✅ **Early Stopping** configurable
 - ✅ **Data Augmentation** con Albumentations
 - ✅ **Mixed Precision Training** (AMP)
+- ✅ **Preprocesamiento eficiente** con compresión NPZ
+- ✅ **Visualización avanzada** de resultados
 
 ## 🤝 Contribución
 

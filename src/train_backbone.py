@@ -31,10 +31,29 @@ class SimCLRDataset(torch.utils.data.Dataset):
     def __init__(self, base_ds, transform):
         self.ds = base_ds
         self.transform = transform
+        # Filtrar imágenes vacías, nulas o completamente negras
+        self.valid_indices = []
+        for i in range(len(self.ds)):
+            try:
+                sample = self.ds[i]
+                img = sample['image']
+                if img is None:
+                    continue
+                img_np = img.cpu().numpy() if torch.is_tensor(img) else img
+                # Verificar si la imagen no está vacía y no es completamente negra
+                if img_np is not None and img_np.size > 0 and not np.allclose(img_np, 0):
+                    self.valid_indices.append(i)
+            except Exception as e:
+                print(f"Error procesando imagen {i}: {e}")
+                continue
+        print(f"[INFO] Filtrando imágenes: {len(self.ds)} total, {len(self.valid_indices)} válidas")
+    
     def __len__(self):
-        return len(self.ds)
+        return len(self.valid_indices)
+    
     def __getitem__(self, idx):
-        sample = self.ds[idx]
+        original_idx = self.valid_indices[idx]
+        sample = self.ds[original_idx]
         img = sample['image'].cpu().numpy()  # (C,H,W)
         img = np.transpose(img, (1,2,0))
         img = (img * 255).astype(np.uint8)
