@@ -230,6 +230,7 @@ class Config:
     def to_yaml(self, yaml_path: str):
         """Guardar configuración en archivo YAML."""
         import os
+        import numpy as np
         dirpath = os.path.dirname(yaml_path)
         if dirpath:
             # Si el path existe y es un archivo, bórralo antes de crear el directorio
@@ -237,8 +238,27 @@ class Config:
                 os.remove(dirpath)
             os.makedirs(dirpath, exist_ok=True)
         import dataclasses
+        
+        def convert_numpy_types(obj):
+            """Convertir tipos numpy a tipos nativos de Python."""
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_types(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            else:
+                return obj
+        
+        config_dict = dataclasses.asdict(self)
+        config_dict = convert_numpy_types(config_dict)
+        
         with open(yaml_path, 'w') as f:
-            yaml.safe_dump(dataclasses.asdict(self), f, sort_keys=False, allow_unicode=True)
+            yaml.safe_dump(config_dict, f, sort_keys=False, allow_unicode=True)
     
     def save(self, output_dir: str):
         """Guardar configuración en el directorio de salida."""

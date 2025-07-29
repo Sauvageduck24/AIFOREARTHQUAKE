@@ -28,6 +28,7 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeEl
 from rich import box
 import numpy as np
 from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
+from tqdm import tqdm
 
 console = Console()
 
@@ -53,6 +54,7 @@ def get_dataloaders(config):
     # Permitir cargar DataLoader serializados (PyTorch >=2.6)
     if hasattr(torch.serialization, "add_safe_globals"):
         torch.serialization.add_safe_globals([torch.utils.data.dataloader.DataLoader])
+    
     # Construir sufijo igual que en data_loader.py
     data_root = getattr(config.data, 'data_root', 'preprocessed')
     split = getattr(config.data, 'split', 'full')
@@ -61,6 +63,7 @@ def get_dataloaders(config):
     if getattr(config.data, 'small_dataset', False):
         small_percentage = getattr(config.data, 'small_percentage', 0.2)
         suffix += f"_small{small_percentage:.0%}"
+    
     dataloader_dir = "outputs/dataloaders"
     train_path = os.path.join(dataloader_dir, f"dataloader_train_{suffix}.pt")
     val_path = os.path.join(dataloader_dir, f"dataloader_val_{suffix}.pt")
@@ -75,17 +78,20 @@ def get_dataloaders(config):
         return train_loader, val_loader, test_loader
     else:
         print(f"[INFO] Dataloaders no encontrados en disco, creándolos desde cero... (sufijo: {suffix})")
+        
         # Parámetros del dataset
         filter_has_data = getattr(config.data, 'filter_has_data', True)
         max_channels = getattr(config.data, 'max_channels', None)
         batch_size = config.data.batch_size
+        
         # Optimización: Aumentar num_workers y usar pin_memory
         num_workers = min(os.cpu_count(), 8)  # Usar hasta 8 workers o el número de CPUs disponible
         pin_memory = True
         persistent_workers = True  # Mantener workers vivos entre épocas
         prefetch_factor = 2  # Prefetch de datos
 
-        # Cargar dataset completo
+        # Cargar dataset completo de forma más eficiente
+        print("[INFO] Cargando dataset completo...")
         dataset_full = EarthquakeTileDataset(
             data_root=data_root,
             split=split,
@@ -93,7 +99,9 @@ def get_dataloaders(config):
             filter_has_data=filter_has_data,
             max_channels=max_channels
         )
-        # Crear splits train/val
+        
+        # Crear splits train/val de forma más eficiente
+        print("[INFO] Creando splits train/val...")
         import numpy as np
         np.random.seed(config.seed)
         indices = np.arange(len(dataset_full))
@@ -102,10 +110,15 @@ def get_dataloaders(config):
         n_train = int(len(indices) * split_ratio)
         train_indices = indices[:n_train]
         val_indices = indices[n_train:]
+        
         # Crear metadatos para cada split
         meta_train = dataset_full.meta_df.iloc[train_indices].reset_index(drop=True)
         meta_val = dataset_full.meta_df.iloc[val_indices].reset_index(drop=True)
+        
+        print(f"[INFO] Split creado: Train={len(meta_train)} | Val={len(meta_val)}")
+        
         # Crear datasets para train y val
+        print("[INFO] Creando datasets de train y val...")
         dataset_train = SubsetEarthquakeTileDataset(
             data_root=data_root,
             split=split,
@@ -122,7 +135,9 @@ def get_dataloaders(config):
             max_channels=max_channels,
             meta_subset=meta_val
         )
+        
         # Crear dataloaders optimizados
+        print("[INFO] Creando dataloaders...")
         train_loader = torch.utils.data.DataLoader(
             dataset_train,
             batch_size=batch_size,
@@ -143,8 +158,20 @@ def get_dataloaders(config):
             prefetch_factor=prefetch_factor,
             collate_fn=custom_collate
         )
+        
         print(f"[INFO] Datasets cargados: Train: {len(dataset_train)} tiles | Val: {len(dataset_val)} tiles")
         print(f"[INFO] Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
+        
+        # Guardar dataloaders para uso futuro (opcional)
+        try:
+            os.makedirs(dataloader_dir, exist_ok=True)
+            print(f"[INFO] Guardando dataloaders en {dataloader_dir}...")
+            torch.save(train_loader, train_path)
+            torch.save(val_loader, val_path)
+            print("[INFO] Dataloaders guardados exitosamente")
+        except Exception as e:
+            print(f"[WARNING] No se pudieron guardar los dataloaders: {e}")
+        
         return train_loader, val_loader, None
 
 class Trainer:
@@ -234,19 +261,51 @@ class Trainer:
             print("[INFO] Entrenando SIN data augmentation (get_dataloaders clásico)")
             from data_loader import get_dataloaders
             self.train_loader, self.val_loader, self.test_loader = get_dataloaders(self.config)
-        # Calcular class_weights automáticamente
-        total = 0
-        damaged = 0
-        for batch in self.train_loader:
-            damaged += batch['damaged'].sum().item()
-            total += batch['damaged'].numel()
-        if damaged > 0 and total > damaged:
-            # Peso para clase 0 (no dañado) y 1 (dañado)
-            w0 = total / (2 * (total - damaged))
-            w1 = total / (2 * damaged)
-            self.config.training.class_weights = [w0, w1]
+        
+        # Calcular class_weights de forma eficiente usando el dataset directamente
+        print("[INFO] Calculando class weights...")
+        if hasattr(self.train_loader.dataset, 'meta_df'):
+            # Usar metadata del dataset si está disponible
+            meta_df = self.train_loader.dataset.meta_df
+            if 'damaged' in meta_df.columns:
+                damaged_count = meta_df['damaged'].sum()
+                total_count = len(meta_df)
+                if damaged_count > 0 and total_count > damaged_count:
+                    w0 = float(total_count / (2 * (total_count - damaged_count)))
+                    w1 = float(total_count / (2 * damaged_count))
+                    self.config.training.class_weights = [w0, w1]
+                    print(f"[INFO] Class weights calculados: [no_damaged={w0:.3f}, damaged={w1:.3f}]")
+                    print(f"[INFO] Distribución: {total_count-damaged_count} no dañados, {damaged_count} dañados")
+                else:
+                    self.config.training.class_weights = None
+                    print("[INFO] No se calcularon class weights (dataset desbalanceado o sin daños)")
+            else:
+                self.config.training.class_weights = None
+                print("[INFO] Columna 'damaged' no encontrada en metadata, usando class_weights=None")
         else:
-            self.config.training.class_weights = None
+            # Fallback: usar un muestreo pequeño para estimar
+            print("[INFO] Metadata no disponible, estimando class weights con muestreo...")
+            total = 0
+            damaged = 0
+            sample_size = min(100, len(self.train_loader))  # Muestrear máximo 100 batches
+            
+            for i, batch in enumerate(self.train_loader):
+                if i >= sample_size:
+                    break
+                damaged += batch['damaged'].sum().item()
+                total += batch['damaged'].numel()
+            
+            if damaged > 0 and total > damaged:
+                # Estimar proporción total basada en la muestra
+                damage_ratio = damaged / total
+                w0 = float(1.0 / (2 * (1 - damage_ratio)))
+                w1 = float(1.0 / (2 * damage_ratio))
+                self.config.training.class_weights = [w0, w1]
+                print(f"[INFO] Class weights estimados: [no_damaged={w0:.3f}, damaged={w1:.3f}]")
+                print(f"[INFO] Muestra: {total-damaged} no dañados, {damaged} dañados (ratio: {damage_ratio:.3f})")
+            else:
+                self.config.training.class_weights = None
+                print("[INFO] No se calcularon class weights (muestra desbalanceada)")
     
     def setup_model(self):
         """Configurar modelo, optimizador y scheduler."""
@@ -354,44 +413,27 @@ class Trainer:
         threshold = getattr(self.config.training, 'threshold', 0.5)
         label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
         n_batches = len(self.train_loader)
-        with Progress(
-            SpinnerColumn(),
-            "[progress.description]{task.description}",
-            BarColumn(),
-            "[progress.percentage]{task.percentage:>3.0f}%",
-            TimeElapsedColumn(),
-            console=console,
-            transient=True
-        ) as progress:
-            task = progress.add_task(f"[cyan]Entrenando (Epoch {epoch+1})", total=n_batches)
-            scaler = self.scaler if self.config.hardware.use_amp else None
-            for batch_idx, batch in enumerate(self.train_loader):
-                images = batch['image'].to(self.device, non_blocking=True)
-                building_mask = batch['building_mask'].to(self.device, non_blocking=True) if 'building_mask' in batch else None
-                targets = batch['damaged'].to(self.device, non_blocking=True)
-                if scaler is not None:
-                    with autocast(device_type='cuda', dtype=torch.float16):
-                        if isinstance(self.model, SiameseCNNClassifier):
-                            logits = self.model(images, building_mask)
-                        else:
-                            logits = self.model(images)
-                        loss = calculate_loss(
-                            logits, targets,
-                            self.config.training.loss_function,
-                            self.config.training.class_weights,
-                            label_smoothing=label_smoothing
-                        )
-                    scaler.scale(loss).backward()
-                    if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
-                        scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(),
-                            self.config.hardware.max_grad_norm
-                        )
-                        scaler.step(self.optimizer)
-                        scaler.update()
-                        self.optimizer.zero_grad(set_to_none=True)
-                else:
+        
+        # Configurar barra de progreso con información detallada
+        pbar = tqdm(
+            total=n_batches, 
+            desc=f"Epoch {epoch+1} [Train]", 
+            unit="batch",
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}'
+        )
+        
+        scaler = self.scaler if self.config.hardware.use_amp else None
+        running_loss = 0.0
+        running_correct = 0
+        running_total = 0
+        
+        for batch_idx, batch in enumerate(self.train_loader):
+            images = batch['image'].to(self.device, non_blocking=True)
+            building_mask = batch['building_mask'].to(self.device, non_blocking=True) if 'building_mask' in batch else None
+            targets = batch['damaged'].to(self.device, non_blocking=True)
+            
+            if scaler is not None:
+                with autocast(device_type='cuda', dtype=torch.float16):
                     if isinstance(self.model, SiameseCNNClassifier):
                         logits = self.model(images, building_mask)
                     else:
@@ -402,26 +444,68 @@ class Trainer:
                         self.config.training.class_weights,
                         label_smoothing=label_smoothing
                     )
-                    loss.backward()
-                    if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(),
-                            self.config.hardware.max_grad_norm
-                        )
-                        self.optimizer.step()
-                        self.optimizer.zero_grad(set_to_none=True)
-                total_loss += loss.detach()
-                with torch.no_grad():
-                    if logits.ndim == 2 and logits.shape[1] == 2:
-                        probs = torch.softmax(logits, dim=1)[:, 1]
-                    else:
-                        probs = torch.sigmoid(logits)
-                    all_predictions.append(probs)
-                    all_targets.append(targets)
-                if batch_idx % 10 == 0 or batch_idx == n_batches - 1:
-                    progress.update(task, advance=1, description=f"[cyan]Entrenando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
+                scaler.scale(loss).backward()
+                if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
+                    scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.hardware.max_grad_norm
+                    )
+                    scaler.step(self.optimizer)
+                    scaler.update()
+                    self.optimizer.zero_grad(set_to_none=True)
+            else:
+                if isinstance(self.model, SiameseCNNClassifier):
+                    logits = self.model(images, building_mask)
                 else:
-                    progress.update(task, advance=1)
+                    logits = self.model(images)
+                loss = calculate_loss(
+                    logits, targets,
+                    self.config.training.loss_function,
+                    self.config.training.class_weights,
+                    label_smoothing=label_smoothing
+                )
+                loss.backward()
+                if (batch_idx + 1) % self.config.hardware.gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.hardware.max_grad_norm
+                    )
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+            
+            total_loss += loss.detach()
+            
+            # Calcular métricas en tiempo real
+            with torch.no_grad():
+                if logits.ndim == 2 and logits.shape[1] == 2:
+                    probs = torch.softmax(logits, dim=1)[:, 1]
+                else:
+                    probs = torch.sigmoid(logits)
+                
+                # Accuracy en tiempo real
+                preds = (probs > threshold).float()
+                correct = (preds == targets).sum().item()
+                running_correct += correct
+                running_total += targets.numel()
+                running_loss += loss.item()
+                
+                all_predictions.append(probs)
+                all_targets.append(targets)
+            
+            # Actualizar barra de progreso con métricas
+            avg_loss = running_loss / (batch_idx + 1)
+            avg_acc = running_correct / running_total if running_total > 0 else 0.0
+            
+            pbar.set_postfix({
+                'Loss': f'{avg_loss:.4f}',
+                'Acc': f'{avg_acc:.3f}',
+                'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
+            })
+            pbar.update(1)
+        
+        pbar.close()
+        
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
@@ -437,42 +521,67 @@ class Trainer:
         threshold = getattr(self.config.training, 'threshold', 0.5)
         label_smoothing = getattr(self.config.training, 'label_smoothing', 0.0)
         n_batches = len(self.val_loader)
+        
+        # Configurar barra de progreso con información detallada
+        pbar = tqdm(
+            total=n_batches, 
+            desc=f"Epoch {epoch+1} [Val]", 
+            unit="batch",
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}'
+        )
+        
+        running_loss = 0.0
+        running_correct = 0
+        running_total = 0
+        
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=self.config.hardware.use_amp):
-            with Progress(
-                SpinnerColumn(),
-                "[progress.description]{task.description}",
-                BarColumn(),
-                "[progress.percentage]{task.percentage:>3.0f}%",
-                TimeElapsedColumn(),
-                console=console,
-                transient=True
-            ) as progress:
-                task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=n_batches)
-                for batch_idx, batch in enumerate(self.val_loader):
-                    images = batch['image'].to(self.device, non_blocking=True)
-                    building_mask = batch['building_mask'].to(self.device, non_blocking=True) if 'building_mask' in batch else None
-                    targets = batch['damaged'].to(self.device, non_blocking=True)
-                    if isinstance(self.model, SiameseCNNClassifier):
-                        logits = self.model(images, building_mask)
-                    else:
-                        logits = self.model(images)
-                    loss = calculate_loss(
-                        logits, targets,
-                        self.config.training.loss_function,
-                        self.config.training.class_weights,
-                        label_smoothing=label_smoothing
-                    )
-                    total_loss += loss
-                    if logits.ndim == 2 and logits.shape[1] == 2:
-                        probs = torch.softmax(logits, dim=1)[:, 1]
-                    else:
-                        probs = torch.sigmoid(logits)
-                    all_predictions.append(probs)
-                    all_targets.append(targets)
-                    if batch_idx % 10 == 0 or batch_idx == n_batches - 1:
-                        progress.update(task, advance=1, description=f"[magenta]Validando (Epoch {epoch+1}) [Loss: {loss.item():.4f}]")
-                    else:
-                        progress.update(task, advance=1)
+            for batch_idx, batch in enumerate(self.val_loader):
+                images = batch['image'].to(self.device, non_blocking=True)
+                building_mask = batch['building_mask'].to(self.device, non_blocking=True) if 'building_mask' in batch else None
+                targets = batch['damaged'].to(self.device, non_blocking=True)
+                
+                if isinstance(self.model, SiameseCNNClassifier):
+                    logits = self.model(images, building_mask)
+                else:
+                    logits = self.model(images)
+                
+                loss = calculate_loss(
+                    logits, targets,
+                    self.config.training.loss_function,
+                    self.config.training.class_weights,
+                    label_smoothing=label_smoothing
+                )
+                
+                total_loss += loss
+                
+                # Calcular métricas en tiempo real
+                if logits.ndim == 2 and logits.shape[1] == 2:
+                    probs = torch.softmax(logits, dim=1)[:, 1]
+                else:
+                    probs = torch.sigmoid(logits)
+                
+                # Accuracy en tiempo real
+                preds = (probs > threshold).float()
+                correct = (preds == targets).sum().item()
+                running_correct += correct
+                running_total += targets.numel()
+                running_loss += loss.item()
+                
+                all_predictions.append(probs)
+                all_targets.append(targets)
+                
+                # Actualizar barra de progreso con métricas
+                avg_loss = running_loss / (batch_idx + 1)
+                avg_acc = running_correct / running_total if running_total > 0 else 0.0
+                
+                pbar.set_postfix({
+                    'Loss': f'{avg_loss:.4f}',
+                    'Acc': f'{avg_acc:.3f}'
+                })
+                pbar.update(1)
+        
+        pbar.close()
+        
         all_predictions = torch.cat(all_predictions, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         metrics = calculate_metrics(all_predictions, all_targets, threshold=threshold)
@@ -570,25 +679,57 @@ class Trainer:
         )
         console.print(table)
         
-        # Información adicional sobre el dataset
+        # Información adicional sobre el dataset (optimizada)
         if hasattr(self, 'train_loader') and hasattr(self, 'val_loader'):
-            # Calcular distribución de clases en train
+            # Calcular distribución de clases de forma eficiente usando metadata
             train_damaged = 0
             train_total = 0
-            for batch in self.train_loader:
-                train_damaged += batch['damaged'].sum().item()
-                train_total += batch['damaged'].size(0)
-            
-            # Calcular distribución de clases en val
             val_damaged = 0
             val_total = 0
-            for batch in self.val_loader:
-                val_damaged += batch['damaged'].sum().item()
-                val_total += batch['damaged'].size(0)
             
-            console.print(f"[bold blue]Distribución de clases:")
-            console.print(f"  Train: {train_damaged}/{train_total} dañados ({train_damaged/train_total*100:.1f}%)")
-            console.print(f"  Val: {val_damaged}/{val_total} dañados ({val_damaged/val_total*100:.1f}%)")
+            # Usar metadata si está disponible (más rápido)
+            if hasattr(self.train_loader.dataset, 'meta_df'):
+                train_meta = self.train_loader.dataset.meta_df
+                if 'damaged' in train_meta.columns:
+                    train_damaged = train_meta['damaged'].sum()
+                    train_total = len(train_meta)
+                
+                val_meta = self.val_loader.dataset.meta_df
+                if 'damaged' in val_meta.columns:
+                    val_damaged = val_meta['damaged'].sum()
+                    val_total = len(val_meta)
+            else:
+                # Fallback: muestreo pequeño para estimar
+                sample_size = min(10, len(self.train_loader))
+                for i, batch in enumerate(self.train_loader):
+                    if i >= sample_size:
+                        break
+                    train_damaged += batch['damaged'].sum().item()
+                    train_total += batch['damaged'].size(0)
+                
+                # Estimar proporción total
+                if train_total > 0:
+                    damage_ratio = train_damaged / train_total
+                    train_total = len(self.train_loader.dataset)
+                    train_damaged = int(train_total * damage_ratio)
+                
+                # Mismo para val
+                sample_size = min(10, len(self.val_loader))
+                for i, batch in enumerate(self.val_loader):
+                    if i >= sample_size:
+                        break
+                    val_damaged += batch['damaged'].sum().item()
+                    val_total += batch['damaged'].size(0)
+                
+                if val_total > 0:
+                    damage_ratio = val_damaged / val_total
+                    val_total = len(self.val_loader.dataset)
+                    val_damaged = int(val_total * damage_ratio)
+            
+            if train_total > 0 and val_total > 0:
+                console.print(f"[bold blue]Distribución de clases:")
+                console.print(f"  Train: {train_damaged}/{train_total} dañados ({train_damaged/train_total*100:.1f}%)")
+                console.print(f"  Val: {val_damaged}/{val_total} dañados ({val_damaged/val_total*100:.1f}%)")
             
             # Explicación del comportamiento de métricas
             if val_metrics['f1_score'] == 0.0 and val_metrics['accuracy'] > 0.5:
@@ -666,7 +807,17 @@ class Trainer:
         if self.swa_start_epoch is not None:
             self.swa_model = AveragedModel(self.model)
             self.swa_scheduler = SWALR(self.optimizer, swa_lr=self.config.training.learning_rate * 0.1)
-        for epoch in range(start_epoch, self.config.training.epochs):
+        
+        # Barra de progreso general para épocas
+        epoch_pbar = tqdm(
+            range(start_epoch, self.config.training.epochs),
+            desc="Training Progress",
+            unit="epoch",
+            position=0,
+            leave=True
+        )
+        
+        for epoch in epoch_pbar:
             console.rule(f"[bold green]Época {epoch+1}/{self.config.training.epochs}")
             
             train_metrics = self.train_epoch(epoch)
@@ -783,6 +934,16 @@ class Trainer:
                     tensorboard_writer=self.tensorboard_writer
                 )
                 console.print(f"[cyan]Train - Loss: {train_metrics['loss']:.4f}, F1: {train_metrics['f1_score']:.4f}, IoU: {train_metrics['iou']:.4f}")
+            
+            # Actualizar barra de progreso general
+            epoch_pbar.set_postfix({
+                'Train_Loss': f'{train_metrics["loss"]:.4f}',
+                'Train_F1': f'{train_metrics["f1_score"]:.4f}',
+                'Best_F1': f'{best_f1:.4f}',
+                'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
+            })
+        
+        epoch_pbar.close()
         
         # Ya no se guarda el mejor modelo aquí, solo el "last" si corresponde
         
@@ -884,7 +1045,7 @@ def main():
     parser.add_argument("--resume", type=str, help="Ruta al checkpoint para resumir")
     parser.add_argument("--seed", type=int, default=42, help="Semilla para reproducibilidad")
     parser.add_argument("--epochs", type=int, help="Número de épocas", default=1)
-    parser.add_argument("--batch_size",default=32, type=int, help="Tamaño de batch")
+    parser.add_argument("--batch_size",default=16, type=int, help="Tamaño de batch")
     parser.add_argument("--lr", default=1e-3, type=float, help="Learning rate")
     parser.add_argument("--model", type=str, help="Nombre del modelo", default='siamese_cnn_classifier')
     # Cambiar optimizador y scheduler por defecto

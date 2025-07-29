@@ -142,48 +142,34 @@ class EarthquakeTileDataset(Dataset):
             if pre_image.shape[0] < max_channels_per_image:
                 pre_pad = np.zeros((max_channels_per_image - pre_image.shape[0], pre_image.shape[1], pre_image.shape[2]), dtype=pre_image.dtype)
                 pre_image = np.concatenate([pre_image, pre_pad], axis=0)
-                # Extender la máscara pre con ceros
-                pre_mask_pad = np.zeros((max_channels_per_image - pre_mask.shape[0], pre_mask.shape[1], pre_mask.shape[2]), dtype=pre_mask.dtype)
-                pre_mask = np.concatenate([pre_mask, pre_mask_pad], axis=0)
             
             # Pad post_image si es necesario
             if post_image.shape[0] < max_channels_per_image:
                 post_pad = np.zeros((max_channels_per_image - post_image.shape[0], post_image.shape[1], post_image.shape[2]), dtype=post_image.dtype)
                 post_image = np.concatenate([post_image, post_pad], axis=0)
-                # Extender la máscara post con ceros
-                post_mask_pad = np.zeros((max_channels_per_image - post_mask.shape[0], post_mask.shape[1], post_mask.shape[2]), dtype=post_mask.dtype)
-                post_mask = np.concatenate([post_mask, post_mask_pad], axis=0)
             
             # Ahora concatenar
             image = np.concatenate([pre_image, post_image], axis=0)
-            # Concatenar máscaras de pre y post
-            mask = np.concatenate([pre_mask, post_mask], axis=0)
+            
+            # Crear máscara de atención que se repite para cada canal
+            # La máscara debe tener el mismo número de canales que la imagen
+            pre_mask_expanded = np.repeat(pre_mask, pre_image.shape[0], axis=0)  # Repetir para cada canal de pre
+            post_mask_expanded = np.repeat(post_mask, post_image.shape[0], axis=0)  # Repetir para cada canal de post
+            mask = np.concatenate([pre_mask_expanded, post_mask_expanded], axis=0)
+            
         elif self.mode == 'pre_only':
             image = pre_image
-            mask = pre_mask
+            # Repetir la máscara para cada canal
+            mask = np.repeat(pre_mask, pre_image.shape[0], axis=0)
         elif self.mode == 'post_only':
             image = post_image
-            mask = post_mask
+            # Repetir la máscara para cada canal
+            mask = np.repeat(post_mask, post_image.shape[0], axis=0)
         else:
             raise ValueError(f"Modo no soportado: {self.mode}")
         
-        # --- Rellenar con ceros si el número de canales es menor al esperado ---
-        if self.max_channels is not None:
-            expected_channels = self.max_channels
-            if self.mode == 'pre_post':
-                expected_channels *= 2
-        else:
-            expected_channels = image.shape[0]
-        
-        if image.shape[0] < expected_channels:
-            pad = np.zeros((expected_channels - image.shape[0], image.shape[1], image.shape[2]), dtype=image.dtype)
-            image = np.concatenate([image, pad], axis=0)
-            # Extender la máscara con ceros para los canales añadidos
-            mask_pad = np.zeros((expected_channels - mask.shape[0], mask.shape[1], mask.shape[2]), dtype=mask.dtype)
-            mask = np.concatenate([mask, mask_pad], axis=0)
-        elif image.shape[0] > expected_channels:
-            image = image[:expected_channels]
-            mask = mask[:expected_channels]
+        # Verificar que image y mask tengan el mismo número de canales
+        assert image.shape[0] == mask.shape[0], f"Image channels ({image.shape[0]}) != mask channels ({mask.shape[0]})"
         
         # Normalización robusta según dtype
         if image.dtype == np.uint16:
@@ -253,10 +239,32 @@ def custom_collate(batch):
         elif key in ['building_mask']:
             # Apilar máscaras del edificio
             masks = [d[key] for d in batch]
-            # Si alguna máscara es 3D (C, H, W), apila normalmente
-            # Si alguna es 1D (C,), expande a (C, 1, 1) y luego apila
+            
+            # Verificar si todas las máscaras tienen el mismo tamaño
+            shapes = [m.shape for m in masks]
+            if len(set(shapes)) > 1:
+                # Si hay diferentes tamaños, encontrar el tamaño máximo
+                max_channels = max(m.shape[0] for m in masks)
+                max_height = max(m.shape[1] for m in masks)
+                max_width = max(m.shape[2] for m in masks)
+                
+                # Pad todas las máscaras al tamaño máximo
+                padded_masks = []
+                for mask in masks:
+                    if mask.shape != (max_channels, max_height, max_width):
+                        # Crear máscara padded con ceros
+                        padded_mask = torch.zeros((max_channels, max_height, max_width), dtype=mask.dtype)
+                        # Copiar los datos originales
+                        padded_mask[:mask.shape[0], :mask.shape[1], :mask.shape[2]] = mask
+                        padded_masks.append(padded_mask)
+                    else:
+                        padded_masks.append(mask)
+                masks = padded_masks
+            
+            # Si alguna máscara es 1D (C,), expande a (C, 1, 1) y luego apila
             if masks[0].ndim == 1:
                 masks = [m[:, None, None] for m in masks]
+            
             batch_out[key] = torch.stack(masks)
         elif key in ['damaged']:
             # Apilar labels
@@ -507,7 +515,7 @@ def main():
                        help='Crear un dataset pequeño para pruebas rápidas')
     parser.add_argument('--small_percentage', type=float, default=0.2,
                        help='Porcentaje del dataset completo para crear dataset small (0.0-1.0)')
-    parser.add_argument('--use_aug', action='store_true',default=True,
+    parser.add_argument('--use_aug', action='store_true',default=False,
                         help='Usar muestreo balanceado y augmentations adaptativos (get_dataloaders_aug)')
     args = parser.parse_args()
 

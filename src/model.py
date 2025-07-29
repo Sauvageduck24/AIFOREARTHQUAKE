@@ -564,7 +564,7 @@ class CNNBackbone(nn.Module):
 class SiameseCNNClassifier(nn.Module):
     """
     Modelo siamés mejorado con backbone CNN compartido para pre y post imagen.
-    Entrada: [B, 2*C, H, W] (pre + post concatenados), y building_mask [B, 2, H, W]
+    Entrada: [B, 2*C, H, W] (pre + post concatenados), y building_mask [B, 2*C, H, W]
     Salida: logit por tile (clasificación binaria)
     """
     def __init__(self, in_channels, dropout=0.3, base=64, backbone_weights_path=None):
@@ -590,20 +590,26 @@ class SiameseCNNClassifier(nn.Module):
             nn.Linear(64, 1)  # Logit
         )
 
-    def forward(self, x, building_mask):
-        # x: [B, 2*C, H, W], building_mask: [B, 2, H, W] (máscara real del edificio para pre y post)
+    def forward(self, x, building_mask=None):
+        # x: [B, 2*C, H, W], building_mask: [B, 2*C, H, W] (máscara de atención para cada canal)
         pre = x[:, :self.c, :, :]
         post = x[:, self.c:, :, :]
         
-        # La máscara ahora contiene la máscara real del edificio
-        # building_mask: [B, 2, H, W] donde el primer canal es máscara pre y el segundo es máscara post
-        pre_mask = building_mask[:, 0:1, :, :]  # [B, 1, H, W]
-        post_mask = building_mask[:, 1:2, :, :]  # [B, 1, H, W]
-        
-        # Aplicar la máscara del edificio como atención (multiplicación elemento a elemento)
-        # Esto hace que el modelo se enfoque en las áreas del edificio
-        pre_masked = pre * pre_mask
-        post_masked = post * post_mask
+        # Manejar caso donde building_mask es None
+        if building_mask is None:
+            # Si no hay máscara, usar toda la imagen (máscara de unos)
+            pre_masked = pre
+            post_masked = post
+        else:
+            # La máscara ahora contiene una máscara de atención para cada canal
+            # building_mask: [B, 2*C, H, W] donde los primeros C canales son para pre y los últimos C para post
+            pre_mask = building_mask[:, :self.c, :, :]  # [B, C, H, W]
+            post_mask = building_mask[:, self.c:, :, :]  # [B, C, H, W]
+            
+            # Aplicar la máscara del edificio como atención (multiplicación elemento a elemento)
+            # Esto hace que el modelo se enfoque en las áreas del edificio
+            pre_masked = pre * pre_mask
+            post_masked = post * post_mask
         
         # Procesar con el backbone
         feat_pre = self.backbone(pre_masked)   # (B, F)

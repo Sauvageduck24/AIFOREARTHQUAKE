@@ -13,7 +13,7 @@ from albumentations.pytorch import ToTensorV2
 
 # & C:/Users/esteb/.conda/envs/earthquake/python.exe src/train_backbone.py --mode pre_post --max_channels 3 --epochs 10 --batch_size 32
 
-# --- Augmentations fuertes estilo SimCLR ---
+# --- Augmentations optimizadas para SimCLR ---
 def get_simclr_transform():
     return A.Compose([
         A.RandomResizedCrop((128, 128), scale=(0.6, 1.0), p=1.0),
@@ -24,29 +24,47 @@ def get_simclr_transform():
         A.GaussNoise(variance_limit=(10.0, 80.0), p=0.5),
         A.RandomBrightnessContrast(0.3, 0.3, p=0.5),
         ToTensorV2(),
-    ])
+    ], p=1.0)
+
+# --- Augmentations más simples y rápidas ---
+def get_fast_simclr_transform():
+    return A.Compose([
+        A.RandomResizedCrop((128, 128), scale=(0.7, 1.0), p=1.0),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.RandomBrightnessContrast(0.2, 0.2, p=0.5),
+        ToTensorV2(),
+    ], p=1.0)
 
 # --- Dataset wrapper para SimCLR ---
 class SimCLRDataset(torch.utils.data.Dataset):
-    def __init__(self, base_ds, transform):
+    def __init__(self, base_ds, transform, check_empty_images=False):
         self.ds = base_ds
         self.transform = transform
-        # Filtrar imágenes vacías, nulas o completamente negras
-        self.valid_indices = []
-        for i in range(len(self.ds)):
-            try:
-                sample = self.ds[i]
-                img = sample['image']
-                if img is None:
+        self.check_empty_images = check_empty_images
+        
+        if check_empty_images:
+            # Solo verificar si realmente es necesario (más eficiente)
+            self.valid_indices = []
+            print("[INFO] Verificando imágenes vacías/negras...")
+            for i in tqdm(range(len(self.ds)), desc="Verificando imágenes"):
+                try:
+                    sample = self.ds[i]
+                    img = sample['image']
+                    if img is None:
+                        continue
+                    img_np = img.cpu().numpy() if torch.is_tensor(img) else img
+                    # Verificación más rápida: solo verificar si la suma es muy baja
+                    if img_np is not None and img_np.size > 0 and img_np.sum() > 1e-6:
+                        self.valid_indices.append(i)
+                except Exception as e:
+                    print(f"Error procesando imagen {i}: {e}")
                     continue
-                img_np = img.cpu().numpy() if torch.is_tensor(img) else img
-                # Verificar si la imagen no está vacía y no es completamente negra
-                if img_np is not None and img_np.size > 0 and not np.allclose(img_np, 0):
-                    self.valid_indices.append(i)
-            except Exception as e:
-                print(f"Error procesando imagen {i}: {e}")
-                continue
-        print(f"[INFO] Filtrando imágenes: {len(self.ds)} total, {len(self.valid_indices)} válidas")
+            print(f"[INFO] Filtrando imágenes: {len(self.ds)} total, {len(self.valid_indices)} válidas")
+        else:
+            # Confiar en el filtro del dataset base
+            self.valid_indices = list(range(len(self.ds)))
+            print(f"[INFO] Usando todas las {len(self.ds)} imágenes del dataset base")
     
     def __len__(self):
         return len(self.valid_indices)
@@ -54,9 +72,15 @@ class SimCLRDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         original_idx = self.valid_indices[idx]
         sample = self.ds[original_idx]
-        img = sample['image'].cpu().numpy()  # (C,H,W)
+        img = sample['image']
+        
+        # Optimización: evitar conversiones innecesarias si ya es tensor
+        if torch.is_tensor(img):
+            img = img.cpu().numpy()
+        
         img = np.transpose(img, (1,2,0))
         img = (img * 255).astype(np.uint8)
+        
         # Dos vistas augmentadas
         aug1 = self.transform(image=img)['image'].float() / 255.
         aug2 = self.transform(image=img)['image'].float() / 255.
@@ -88,17 +112,21 @@ def main():
     parser.add_argument('--data_root', type=str, default='preprocessed', help='Directorio de datos preprocesados')
     parser.add_argument('--mode', type=str, default='pre_post', choices=['pre_only','post_only','pre_post'], help='Modo de datos')
     parser.add_argument('--max_channels', type=int, default=3, help='Nº de canales a usar')
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size (aumentado por defecto)')
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--out_dim', type=int, default=128, help='Dimensión del proyector SimCLR')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--save_path', type=str, default='outputs/models/cnnbackbone_simclr.pth')
-    parser.add_argument('--num_workers', type=int, default=min(os.cpu_count(), 12), help='Número de workers para DataLoader')
+    parser.add_argument('--num_workers', type=int, default=min(os.cpu_count(), 8), help='Número de workers para DataLoader')
+    parser.add_argument('--check_empty_images', action='store_true', help='Verificar imágenes vacías/negras (lento)')
+    parser.add_argument('--max_samples', type=int, default=None, help='Máximo número de muestras para entrenamiento (para pruebas)')
+    parser.add_argument('--splits', nargs='+', default=['full'], help='Splits a cargar')
+    parser.add_argument('--fast_aug', action='store_true',default=True, help='Usar augmentaciones más rápidas')
     args = parser.parse_args()
 
     from torch.utils.data import ConcatDataset
-    splits_to_load = ['full', 'test']
+    splits_to_load = args.splits
     print(f"[INFO] Cargando datos de los splits: {splits_to_load}")
 
     # Dataset
@@ -114,10 +142,27 @@ def main():
             all_datasets.append(EarthquakeTileDataset(data_root=args.data_root, split=split, mode=args.mode, filter_has_data=True, max_channels=args.max_channels))
         base_ds = ConcatDataset(all_datasets)
     
+    # Limitar muestras si se especifica (útil para pruebas)
+    if args.max_samples and len(base_ds) > args.max_samples:
+        from torch.utils.data import Subset
+        import random
+        random.seed(42)
+        indices = random.sample(range(len(base_ds)), args.max_samples)
+        base_ds = Subset(base_ds, indices)
+        print(f"[INFO] Limitando a {args.max_samples} muestras para entrenamiento")
+    
     print(f"[INFO] Total de tiles para pre-entrenamiento: {len(base_ds)}")
     
-    transform = get_simclr_transform()
-    simclr_ds = SimCLRDataset(base_ds, transform)
+    # Seleccionar transformaciones
+    if args.fast_aug:
+        transform = get_fast_simclr_transform()
+        print("[INFO] Usando augmentaciones rápidas")
+    else:
+        transform = get_simclr_transform()
+        print("[INFO] Usando augmentaciones completas")
+    simclr_ds = SimCLRDataset(base_ds, transform, check_empty_images=args.check_empty_images)
+    
+    # Optimizar DataLoader
     loader = DataLoader(
         simclr_ds,
         batch_size=args.batch_size,
@@ -125,7 +170,9 @@ def main():
         num_workers=args.num_workers,
         drop_last=True,
         pin_memory=True,
-        prefetch_factor=2
+        prefetch_factor=2,
+        persistent_workers=True if args.num_workers > 0 else False,
+        generator=torch.Generator(device='cpu')  # Para reproducibilidad
     )
 
     # Modelo
@@ -135,23 +182,40 @@ def main():
         nn.ReLU(),
         nn.Linear(args.out_dim, args.out_dim)
     ).to(args.device)
-    optimizer = optim.Adam(list(backbone.parameters()) + list(projector.parameters()), lr=args.lr)
+    
+    # Optimizar optimizer
+    optimizer = optim.AdamW(list(backbone.parameters()) + list(projector.parameters()), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    
     loss_fn = NTXentLoss(temperature=0.5)
     scaler = torch.cuda.amp.GradScaler()
 
-    # Entrenamiento
+    # Entrenamiento optimizado
     backbone.train()
     projector.train()
-    all_epoch_losses = []  # Guardar la pérdida media de cada epoch
+    all_epoch_losses = []
+    
+    print(f"[INFO] Iniciando entrenamiento con {len(loader)} batches por epoch")
+    print(f"[INFO] Batch size: {args.batch_size}, Workers: {args.num_workers}")
+    
     for epoch in range(args.epochs):
         total_loss = 0
         batch_losses = []
-        pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{args.epochs}", leave=True, ncols=100)
+        running_loss = 0  # Para pérdida móvil
+        
+        # Optimizar barra de progreso con mejor formato
+        pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{args.epochs}", 
+                   leave=True, ncols=140, 
+                   position=0, 
+                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        
         for batch_idx, (aug1, aug2) in enumerate(pbar):
-            aug1 = aug1.to(args.device, non_blocking=True)
-            aug2 = aug2.to(args.device, non_blocking=True)
+            # Mover datos a GPU de forma más eficiente
+            aug1 = aug1.to(args.device, non_blocking=True, dtype=torch.float16)
+            aug2 = aug2.to(args.device, non_blocking=True, dtype=torch.float16)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # Más eficiente
+            
             with torch.cuda.amp.autocast():
                 z1 = projector(backbone(aug1))
                 z2 = projector(backbone(aug2))
@@ -164,18 +228,58 @@ def main():
             loss_value = loss.item()
             total_loss += loss_value
             batch_losses.append(loss_value)
-            # Actualizar barra de progreso con la pérdida media de la epoch y la del batch
-            pbar.set_postfix({
-                'BatchLoss': f"{loss_value:.4f}",
-                'AvgLoss': f"{np.mean(batch_losses):.4f}"
-            })
+            
+            # Calcular pérdida móvil (últimos 10 batches)
+            running_loss = np.mean(batch_losses[-10:]) if len(batch_losses) >= 10 else np.mean(batch_losses)
+            
+            # Actualizar barra de progreso más frecuentemente con más información
+            if batch_idx % 5 == 0 or batch_idx == len(loader) - 1:
+                # Calcular tendencia de la pérdida
+                if len(batch_losses) >= 20:
+                    recent_losses = batch_losses[-20:]
+                    trend = "↗️" if recent_losses[-1] > recent_losses[0] else "↘️" if recent_losses[-1] < recent_losses[0] else "➡️"
+                else:
+                    trend = "➡️"
+                
+                pbar.set_postfix({
+                    'Loss': f"{loss_value:.4f}",
+                    'Avg10': f"{running_loss:.4f}",
+                    'EpochAvg': f"{np.mean(batch_losses):.4f}",
+                    'Trend': trend,
+                    'LR': f"{scheduler.get_last_lr()[0]:.2e}",
+                    'Min': f"{min(batch_losses):.4f}",
+                    'Max': f"{max(batch_losses):.4f}"
+                })
+        
+        scheduler.step()
         epoch_avg_loss = total_loss / len(loader)
         all_epoch_losses.append(epoch_avg_loss)
-        print(f"[Epoch {epoch+1}] Avg Loss: {epoch_avg_loss:.4f}")
-    # Guardar backbone preentrenado solo al final
+        
+        # Mostrar resumen del epoch con más detalles
+        print(f"\n[Epoch {epoch+1}] Resumen:")
+        print(f"  • Pérdida promedio: {epoch_avg_loss:.4f}")
+        print(f"  • Pérdida mínima: {min(batch_losses):.4f}")
+        print(f"  • Pérdida máxima: {max(batch_losses):.4f}")
+        print(f"  • Learning rate: {scheduler.get_last_lr()[0]:.2e}")
+        if len(all_epoch_losses) > 1:
+            improvement = all_epoch_losses[-2] - epoch_avg_loss
+            print(f"  • Mejora vs epoch anterior: {improvement:+.4f}")
+        print("-" * 50)
+    
+    # Guardar backbone preentrenado
     os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
     torch.save(backbone.state_dict(), args.save_path)
     print(f"Backbone guardado en {args.save_path}")
+    
+    # Mostrar evolución completa de pérdidas
+    print(f"\n📊 Evolución de pérdidas por epoch:")
+    for i, loss in enumerate(all_epoch_losses):
+        if i > 0:
+            change = all_epoch_losses[i-1] - loss
+            arrow = "↘️" if change > 0 else "↗️" if change < 0 else "➡️"
+            print(f"  Epoch {i+1}: {loss:.4f} {arrow} ({change:+.4f})")
+        else:
+            print(f"  Epoch {i+1}: {loss:.4f}")
 
 if __name__ == "__main__":
     main() 
