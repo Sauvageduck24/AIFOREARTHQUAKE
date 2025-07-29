@@ -81,9 +81,9 @@ def main():
     with torch.no_grad():
         for batch in tqdm(test_loader, desc='Inferencia'): 
             images = batch['image'].to(device)  # [B, C, H, W]
-            presence_mask = batch['presence_mask'].to(device) if 'presence_mask' in batch else None
+            building_mask = batch['building_mask'].to(device) if 'building_mask' in batch else None
             if isinstance(model, SiameseCNNClassifier):
-                logits = model(images, presence_mask)
+                logits = model(images, building_mask)
             else:
                 logits = model(images)
             if logits.ndim == 1:

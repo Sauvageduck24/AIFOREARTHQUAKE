@@ -367,12 +367,12 @@ class Trainer:
             scaler = self.scaler if self.config.hardware.use_amp else None
             for batch_idx, batch in enumerate(self.train_loader):
                 images = batch['image'].to(self.device, non_blocking=True)
-                presence_mask = batch['presence_mask'].to(self.device, non_blocking=True) if 'presence_mask' in batch else None
+                building_mask = batch['building_mask'].to(self.device, non_blocking=True) if 'building_mask' in batch else None
                 targets = batch['damaged'].to(self.device, non_blocking=True)
                 if scaler is not None:
                     with autocast(device_type='cuda', dtype=torch.float16):
                         if isinstance(self.model, SiameseCNNClassifier):
-                            logits = self.model(images, presence_mask)
+                            logits = self.model(images, building_mask)
                         else:
                             logits = self.model(images)
                         loss = calculate_loss(
@@ -393,7 +393,7 @@ class Trainer:
                         self.optimizer.zero_grad(set_to_none=True)
                 else:
                     if isinstance(self.model, SiameseCNNClassifier):
-                        logits = self.model(images, presence_mask)
+                        logits = self.model(images, building_mask)
                     else:
                         logits = self.model(images)
                     loss = calculate_loss(
@@ -450,10 +450,10 @@ class Trainer:
                 task = progress.add_task(f"[magenta]Validando (Epoch {epoch+1})", total=n_batches)
                 for batch_idx, batch in enumerate(self.val_loader):
                     images = batch['image'].to(self.device, non_blocking=True)
-                    presence_mask = batch['presence_mask'].to(self.device, non_blocking=True) if 'presence_mask' in batch else None
+                    building_mask = batch['building_mask'].to(self.device, non_blocking=True) if 'building_mask' in batch else None
                     targets = batch['damaged'].to(self.device, non_blocking=True)
                     if isinstance(self.model, SiameseCNNClassifier):
-                        logits = self.model(images, presence_mask)
+                        logits = self.model(images, building_mask)
                     else:
                         logits = self.model(images)
                     loss = calculate_loss(
@@ -684,10 +684,10 @@ class Trainer:
                 all_tgts = []
                 for batch in self.val_loader:
                     images = batch['image'].to(self.device)
-                    presence_mask = batch['presence_mask'].to(self.device) if 'presence_mask' in batch else None
+                    building_mask = batch['building_mask'].to(self.device) if 'building_mask' in batch else None
                     targets = batch['damaged'].to(self.device)
                     if isinstance(self.model, SiameseCNNClassifier):
-                        logits = self.model(images, presence_mask)
+                        logits = self.model(images, building_mask)
                     else:
                         logits = self.model(images)
                     if logits.ndim == 2 and logits.shape[1] == 2:
@@ -830,7 +830,7 @@ class Trainer:
         with torch.no_grad():
             for batch in loader:
                 images = batch['image'].to(self.device)
-                presence_mask = batch['presence_mask'].to(self.device) if 'presence_mask' in batch else None
+                building_mask = batch['building_mask'].to(self.device) if 'building_mask' in batch else None
                 aug_images = [images]
                 if n_aug > 1:
                     aug_images.append(torch.flip(images, dims=[-1]))  # horizontal
@@ -841,7 +841,7 @@ class Trainer:
                 probs = 0
                 for aug in aug_images[:n_aug]:
                     if isinstance(self.model, SiameseCNNClassifier):
-                        logits = self.model(aug, presence_mask)
+                        logits = self.model(aug, building_mask)
                     else:
                         logits = self.model(aug)
                     if logits.ndim == 2 and logits.shape[1] == 2:

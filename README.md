@@ -109,7 +109,9 @@ AIFOREARTHQUAKE/
 │   │   ├── dataset.jpg               # Estructura del dataset
 │   │   ├── Figure_1_cerca.png        # Vista cercana de predicciones
 │   │   ├── Figure_1_lejos.png        # Vista lejana de predicciones
-│   │   └── georeferencicion.png      # Proceso de georreferenciación
+│   │   ├── georeferencicion.png      # Proceso de georreferenciación
+│   │   ├── image_visualizar_tile.png # Visualización de tiles pre/post
+│   │   └── image_visualizar_tile_2.png # Análisis detallado de tiles
 │   └── 📁 international-charter-eo4ai-etq-challenge/  # Dataset original (ignorado)
 ├── 📁 configs/                       # Configuraciones de experimentos
 │   ├── baseline.yaml                 # Configuración base
@@ -175,6 +177,15 @@ AIFOREARTHQUAKE/
   - Dice Coefficient (F1-Score)
   - Precision y Recall
   - Accuracy por clase
+
+#### 🖼️ **Visualización (`src/visualizar_escenas.py`)**
+- **Tamaño**: 53KB, 1,095 líneas
+- **Función**: Herramientas avanzadas de visualización
+- **Características**:
+  - Visualización de tiles pre/post evento
+  - Análisis de bandas espectrales
+  - Comparación de máscaras de daño
+  - Generación de overlays informativos
 
 ---
 
@@ -402,6 +413,20 @@ Nuestro sistema proporciona visualizaciones a diferentes escalas para evaluar la
 
 *Vista general del área afectada, permitiendo evaluar la distribución espacial de los daños y la cobertura del modelo.*
 
+### 🖼️ Análisis de Tiles y Visualización
+
+Nuestro sistema incluye herramientas avanzadas de visualización para analizar los tiles generados durante el preprocesamiento:
+
+#### **Visualización de Tiles Pre/Post Evento**
+![Visualización de tiles](data/imgs/image_visualizar_tile.png)
+
+*Comparación detallada de tiles antes y después del evento sísmico, mostrando las diferencias espectrales y estructurales que indican daños.*
+
+#### **Análisis Detallado de Tiles**
+![Análisis de tiles](data/imgs/image_visualizar_tile_2.png)
+
+*Análisis profundo de la composición espectral de los tiles, incluyendo bandas individuales y combinaciones que resaltan características de daño.*
+
 ### 📊 Métricas de Rendimiento
 
 | Métrica | Baseline | UNet-ResNet50 | Transformer | Ensemble |
@@ -533,6 +558,7 @@ El directorio `proof_scripts/` contiene herramientas avanzadas para análisis y 
 - `view_augmented_batch.py`: Visualización de batches aumentados
 - `view_gpkg_content.py`: Visualización de contenido GPKG
 - `view_prepost_tile.py`: Visualización de tiles pre/post
+- `visualizar_escenas.py`: Herramientas avanzadas de visualización de tiles
 
 ### 📊 Experimentos Recomendados
 
@@ -641,6 +667,7 @@ python src/test.py --ensemble --model_paths outputs/models/
 - ✅ **Loss Functions**: Múltiples funciones de pérdida
 - ✅ **Métricas**: Implementación completa de métricas de evaluación
 - ✅ **Configuración**: Sistema flexible de configuración YAML
+- ✅ **Visualización**: Herramientas avanzadas de análisis visual
 
 ### 🔮 Características Futuras
 

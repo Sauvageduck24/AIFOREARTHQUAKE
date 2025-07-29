@@ -103,7 +103,7 @@ class EarthquakeTileDataset(Dataset):
             if has_post:
                 shape = tile_data['post'].shape
             else:
-                shape = (3, 256, 256)  # tamaño por defecto
+                shape = (4, 256, 256)  # tamaño por defecto incluyendo máscara
             pre_data = np.zeros(shape, dtype=np.float32)
             
         if has_post:
@@ -113,30 +113,57 @@ class EarthquakeTileDataset(Dataset):
             shape = pre_data.shape
             post_data = np.zeros(shape, dtype=np.float32)
         
-        # Limitar canales si se especifica
+        # Extraer el canal de máscara (último canal) y separarlo de los datos de imagen
+        def extract_mask_and_image(data):
+            if data.shape[0] >= 4:  # Si hay al menos 4 canales, el último es la máscara
+                image_channels = data[:-1]  # Todos excepto el último
+                mask_channel = data[-1:]     # Solo el último canal
+                return image_channels, mask_channel
+            else:
+                # Si no hay suficientes canales, crear máscara por defecto
+                image_channels = data
+                mask_channel = np.ones((1, data.shape[1], data.shape[2]), dtype=data.dtype)
+                return image_channels, mask_channel
+        
+        pre_image, pre_mask = extract_mask_and_image(pre_data)
+        post_image, post_mask = extract_mask_and_image(post_data)
+        
+        # Limitar canales si se especifica (solo para canales de imagen, no máscara)
         if self.max_channels is not None:
-            pre_data = pre_data[:self.max_channels]
-            post_data = post_data[:self.max_channels]
-        # Si max_channels es None, usar todos los canales (no recortar)
+            pre_image = pre_image[:self.max_channels]
+            post_image = post_image[:self.max_channels]
         
         # Preparar imagen según modo
         if self.mode == 'pre_post':
-            image = np.concatenate([pre_data, post_data], axis=0)
-            # Crear máscara de presencia para pre_post
-            mask = np.concatenate([
-                np.ones(pre_data.shape[0]) if has_pre else np.zeros(pre_data.shape[0]),
-                np.ones(post_data.shape[0]) if has_post else np.zeros(post_data.shape[0])
-            ])
-            # Expandir la máscara a (C_total, H, W)
-            mask = mask[:, None, None].astype(np.float32)
-            mask = np.broadcast_to(mask, image.shape).copy()
-            assert mask.shape == image.shape, f"Presence mask shape {mask.shape} != image shape {image.shape}"
+            # Asegurar que pre y post tengan el mismo número de canales antes de concatenar
+            max_channels_per_image = max(pre_image.shape[0], post_image.shape[0])
+            
+            # Pad pre_image si es necesario
+            if pre_image.shape[0] < max_channels_per_image:
+                pre_pad = np.zeros((max_channels_per_image - pre_image.shape[0], pre_image.shape[1], pre_image.shape[2]), dtype=pre_image.dtype)
+                pre_image = np.concatenate([pre_image, pre_pad], axis=0)
+                # Extender la máscara pre con ceros
+                pre_mask_pad = np.zeros((max_channels_per_image - pre_mask.shape[0], pre_mask.shape[1], pre_mask.shape[2]), dtype=pre_mask.dtype)
+                pre_mask = np.concatenate([pre_mask, pre_mask_pad], axis=0)
+            
+            # Pad post_image si es necesario
+            if post_image.shape[0] < max_channels_per_image:
+                post_pad = np.zeros((max_channels_per_image - post_image.shape[0], post_image.shape[1], post_image.shape[2]), dtype=post_image.dtype)
+                post_image = np.concatenate([post_image, post_pad], axis=0)
+                # Extender la máscara post con ceros
+                post_mask_pad = np.zeros((max_channels_per_image - post_mask.shape[0], post_mask.shape[1], post_mask.shape[2]), dtype=post_mask.dtype)
+                post_mask = np.concatenate([post_mask, post_mask_pad], axis=0)
+            
+            # Ahora concatenar
+            image = np.concatenate([pre_image, post_image], axis=0)
+            # Concatenar máscaras de pre y post
+            mask = np.concatenate([pre_mask, post_mask], axis=0)
         elif self.mode == 'pre_only':
-            image = pre_data
-            mask = np.ones(pre_data.shape[0]) if has_pre else np.zeros(pre_data.shape[0])
+            image = pre_image
+            mask = pre_mask
         elif self.mode == 'post_only':
-            image = post_data
-            mask = np.ones(post_data.shape[0]) if has_post else np.zeros(post_data.shape[0])
+            image = post_image
+            mask = post_mask
         else:
             raise ValueError(f"Modo no soportado: {self.mode}")
         
@@ -152,8 +179,8 @@ class EarthquakeTileDataset(Dataset):
             pad = np.zeros((expected_channels - image.shape[0], image.shape[1], image.shape[2]), dtype=image.dtype)
             image = np.concatenate([image, pad], axis=0)
             # Extender la máscara con ceros para los canales añadidos
-            faltan = expected_channels - mask.shape[0]
-            mask = np.concatenate([mask, np.zeros((faltan, image.shape[1], image.shape[2]), dtype=mask.dtype)], axis=0)
+            mask_pad = np.zeros((expected_channels - mask.shape[0], mask.shape[1], mask.shape[2]), dtype=mask.dtype)
+            mask = np.concatenate([mask, mask_pad], axis=0)
         elif image.shape[0] > expected_channels:
             image = image[:expected_channels]
             mask = mask[:expected_channels]
@@ -164,10 +191,15 @@ class EarthquakeTileDataset(Dataset):
         elif image.dtype == np.uint8:
             image = image / 255.0
         # Si es float, asume que ya está normalizada
+        
+        # Normalizar máscara a [0,1] si es necesario
+        if mask.dtype == np.uint16:
+            mask = mask / 65535.0
+        elif mask.dtype == np.uint8:
+            mask = mask / 255.0
+        
         image = torch.from_numpy(image).float()
         mask = torch.from_numpy(mask).float()
-        # --- Opcional: expandir presence_mask a (C, H, W) si se usa como canal ---
-        # mask = mask[:, None, None].expand(-1, image.shape[1], image.shape[2])
         
         # Preparar label
         damaged = int(row['damaged'])
@@ -176,7 +208,7 @@ class EarthquakeTileDataset(Dataset):
         
         return {
             'image': image,
-            'presence_mask': mask,  # Si quieres shape (C,H,W), descomenta la línea arriba
+            'building_mask': mask,  # Ahora contiene la máscara real del edificio
             'damaged': torch.tensor(damaged, dtype=torch.float32),
             'fid': row['fid'],
             'tile_path': str(tile_path),
@@ -218,8 +250,8 @@ def custom_collate(batch):
         if key in ['image']:
             # Apilar imágenes
             batch_out[key] = torch.stack([d[key] for d in batch])
-        elif key in ['presence_mask']:
-            # Apilar máscaras de presencia
+        elif key in ['building_mask']:
+            # Apilar máscaras del edificio
             masks = [d[key] for d in batch]
             # Si alguna máscara es 3D (C, H, W), apila normalmente
             # Si alguna es 1D (C,), expande a (C, 1, 1) y luego apila
@@ -524,9 +556,9 @@ def main():
             console.print(f"  FIDs: {sample_batch['fid'][:3]}...")
             # --- PRINTS ADICIONALES PARA pre_post ---
             if args.mode == 'pre_post':
-                pmask = sample_batch['presence_mask']
-                console.print(f"  Presence mask shape: {pmask.shape}")
-                console.print(f"  Presence mask sum por tile: {pmask.sum(dim=1)}")
+                pmask = sample_batch['building_mask']
+                console.print(f"  Building mask shape: {pmask.shape}")
+                console.print(f"  Building mask sum por tile: {pmask.sum(dim=1)}")
                 # Chequear si hay tiles con pre o post todo ceros
                 nchan = pmask.shape[1] // 2
                 pre_zeros = (sample_batch['image'][:, :nchan].abs().sum(dim=(1,2,3)) == 0)
@@ -543,9 +575,9 @@ def main():
                 console.print(f"  Image shape: {test_batch['image'].shape}")
                 console.print(f"  FIDs: {test_batch['fid'][:3]}...")
                 if args.mode == 'pre_post':
-                    pmask = test_batch['presence_mask']
-                    console.print(f"  Presence mask shape: {pmask.shape}")
-                    console.print(f"  Presence mask sum por tile: {pmask.sum(dim=1)}")
+                    pmask = test_batch['building_mask']
+                    console.print(f"  Building mask shape: {pmask.shape}")
+                    console.print(f"  Building mask sum por tile: {pmask.sum(dim=1)}")
                     nchan = pmask.shape[1] // 2
                     pre_zeros = (test_batch['image'][:, :nchan].abs().sum(dim=(1,2,3)) == 0)
                     post_zeros = (test_batch['image'][:, nchan:].abs().sum(dim=(1,2,3)) == 0)

@@ -564,14 +564,14 @@ class CNNBackbone(nn.Module):
 class SiameseCNNClassifier(nn.Module):
     """
     Modelo siamés mejorado con backbone CNN compartido para pre y post imagen.
-    Entrada: [B, 2*C, H, W] (pre + post concatenados), y presence_mask [B, 2*C, H, W]
+    Entrada: [B, 2*C, H, W] (pre + post concatenados), y building_mask [B, 2, H, W]
     Salida: logit por tile (clasificación binaria)
     """
     def __init__(self, in_channels, dropout=0.3, base=64, backbone_weights_path=None):
         super().__init__()
         self.c = in_channels  # canales por imagen (pre o post)
-        # El backbone ahora espera imagen+mask: C*2 canales por rama
-        self.backbone = CNNBackbone(in_channels * 2, dropout=dropout, base=base)
+        # El backbone ahora espera solo los canales de imagen (sin máscara concatenada)
+        self.backbone = CNNBackbone(in_channels, dropout=dropout, base=base)
         if backbone_weights_path is not None:
             state_dict = torch.load(backbone_weights_path, map_location='cpu')
             self.backbone.load_state_dict(state_dict, strict=False)
@@ -590,19 +590,32 @@ class SiameseCNNClassifier(nn.Module):
             nn.Linear(64, 1)  # Logit
         )
 
-    def forward(self, x, presence_mask):
-        # x: [B, 2*C, H, W], presence_mask: [B, 2*C, H, W]
+    def forward(self, x, building_mask):
+        # x: [B, 2*C, H, W], building_mask: [B, 2, H, W] (máscara real del edificio para pre y post)
         pre = x[:, :self.c, :, :]
         post = x[:, self.c:, :, :]
-        pre_mask = presence_mask[:, :self.c, :, :]
-        post_mask = presence_mask[:, self.c:, :, :]
-        # Concatenar la máscara como canales extra
-        pre_input = torch.cat([pre, pre_mask], dim=1)   # [B, 2*C, H, W]
-        post_input = torch.cat([post, post_mask], dim=1) # [B, 2*C, H, W]
-        feat_pre = self.backbone(pre_input)   # (B, F)
-        feat_post = self.backbone(post_input) # (B, F)
+        
+        # La máscara ahora contiene la máscara real del edificio
+        # building_mask: [B, 2, H, W] donde el primer canal es máscara pre y el segundo es máscara post
+        pre_mask = building_mask[:, 0:1, :, :]  # [B, 1, H, W]
+        post_mask = building_mask[:, 1:2, :, :]  # [B, 1, H, W]
+        
+        # Aplicar la máscara del edificio como atención (multiplicación elemento a elemento)
+        # Esto hace que el modelo se enfoque en las áreas del edificio
+        pre_masked = pre * pre_mask
+        post_masked = post * post_mask
+        
+        # Procesar con el backbone
+        feat_pre = self.backbone(pre_masked)   # (B, F)
+        feat_post = self.backbone(post_masked) # (B, F)
+        
+        # Calcular diferencia de características
         feat_diff = torch.abs(feat_pre - feat_post)
+        
+        # Concatenar características
         feat = torch.cat([feat_pre, feat_post, feat_diff], dim=1)  # (B, 3F)
+        
+        # Clasificación final
         logit = self.classifier(feat)  # (B, 1)
         return logit.squeeze(1)  # (B,)
 
