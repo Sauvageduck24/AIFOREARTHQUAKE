@@ -6,6 +6,8 @@ import geopandas as gpd
 import numpy as np
 import shutil
 import json
+import fiona
+import warnings
 from pathlib import Path
 from model import get_model
 from model import SiameseCNNClassifier
@@ -14,6 +16,13 @@ from utils import setup_logging
 from data_loader import EarthquakeTileDataset, custom_collate, get_dataloaders
 from transforms import get_val_test_transforms
 from tqdm import tqdm
+
+# Configurar PROJ para evitar warnings
+os.environ['PROJ_LIB'] = os.path.join(os.path.dirname(sys.executable), 'Library', 'share', 'proj')
+os.environ['GDAL_DATA'] = os.path.join(os.path.dirname(sys.executable), 'Library', 'share', 'gdal')
+
+# Suprimir warnings específicos de pyproj
+warnings.filterwarnings("ignore", message="pyproj unable to set PROJ database path")
 
 # --- Argumentos ---
 def parse_args():
@@ -24,9 +33,10 @@ def parse_args():
     parser.add_argument('--config', type=str, default='config.yaml', help='Archivo de configuración')
     parser.add_argument('--device', type=str, default='cuda', help='cpu o cuda')
     parser.add_argument('--split', type=str, default='test', help='Split de preprocesado a usar (test o full)')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size para inferencia')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size para inferencia')
     parser.add_argument('--threshold', type=float, default=None, help='Umbral para binarización (override config)')
-    parser.add_argument('--num_workers', type=int, default=12, help='Número de workers para DataLoader')
+    parser.add_argument('--num_workers', type=int, default=4, help='Número de workers para DataLoader')
+    parser.add_argument('--prueba', action='store_true',default=True, help='Modo prueba: solo procesa 1 batch para verificar funcionamiento')
     return parser.parse_args()
 
 def load_checkpoint_to_model(model, checkpoint_path, device):
@@ -49,6 +59,49 @@ def get_ciudad_a_evento(annotations_dir):
                     base = f.split('_')[0].lower()
                     ciudad_a_evento[base] = evento_folder.lower()
     return ciudad_a_evento
+
+def load_gpkg_with_fiona(gpkg_path):
+    """Carga un archivo GPKG usando Fiona y lo convierte a GeoDataFrame."""
+    features = []
+    feature_ids = []
+    selected_fid_column = None  # Guardar qué columna usamos
+    crs = None
+    
+    with fiona.open(gpkg_path) as src:
+        crs = src.crs
+        schema_columns = list(src.schema['properties'].keys())
+        
+        # Buscar columnas que empiecen con 'fid_'
+        fid_columns = [col for col in schema_columns if col.lower().startswith('fid_')]
+        
+        if fid_columns:
+            # Si encontramos columnas fid_*, usar la primera como identificador
+            selected_fid_column = fid_columns[0]
+            
+            for feature in src:
+                features.append(feature)
+                # Usar el valor de la columna fid_* como identificador
+                fid_value = feature['properties'].get(selected_fid_column)
+                feature_ids.append(fid_value)
+        else:
+            # Si no hay columnas fid_*, usar el id del feature de Fiona
+            for feature in src:
+                features.append(feature)
+                # Extraer el id del feature de Fiona
+                feature_ids.append(feature.get('id'))
+    
+    # Convertir a GeoDataFrame
+    gdf = gpd.GeoDataFrame.from_features(features, crs=crs)
+    
+    # Asignar los IDs a la columna apropiada
+    if selected_fid_column:
+        # Si usamos una columna fid_*, mantener ese nombre
+        gdf[selected_fid_column] = feature_ids
+    else:
+        # Si usamos el ID de Fiona, asignar a columna 'id'
+        gdf['id'] = feature_ids
+    
+    return gdf
 
 def main():
     args = parse_args()
@@ -79,7 +132,12 @@ def main():
     # --- Inferencia por batches ---
     pred_dict = {}
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc='Inferencia'): 
+        for i, batch in enumerate(tqdm(test_loader, desc='Inferencia')): 
+            # Si es modo prueba, solo procesar 1 batch
+            if args.prueba and i >= 1:
+                print(f"[PRUEBA] Procesado 1 batch. Saltando el resto...")
+                break
+                
             images = batch['image'].to(device)  # [B, C, H, W]
             building_mask = batch['building_mask'].to(device) if 'building_mask' in batch else None
             if isinstance(model, SiameseCNNClassifier):
@@ -98,8 +156,8 @@ def main():
             #print(f"[DEBUG] Batch preds: {preds[:20]}")
             fids = batch['fid']
             events = batch['event']
-            for i in range(len(preds)):
-                pred_dict[(events[i], fids[i])] = int(preds[i])
+            for j in range(len(preds)):
+                pred_dict[(events[j], fids[j])] = int(preds[j])
     # DEBUG: Mostrar ejemplos de claves en pred_dict
     print(f"[DEBUG] Ejemplo de claves en pred_dict: {list(pred_dict.keys())[:20]}")
     # --- Procesar cada archivo .gpkg ---
@@ -111,7 +169,7 @@ def main():
     ciudad_a_evento = get_ciudad_a_evento(annotations_dir)
     for fname in tqdm(gpkg_files, desc='Procesando archivos .gpkg'):
         in_path = os.path.join(args.input_dir, fname)
-        gdf = gpd.read_file(in_path)
+        gdf = load_gpkg_with_fiona(in_path)
         # Extraer nombre base de ciudad/evento del nombre del archivo
         base = os.path.splitext(fname)[0]
         # Tomar la parte de ciudad/evento (antes de '_testing')
@@ -147,6 +205,12 @@ def main():
                     evento_usar = event_name
             pred = pred_dict.get((evento_usar, fid), 0)
             damages.append(pred)
+        
+        # Si es modo prueba, mostrar información sobre las predicciones
+        if args.prueba:
+            total_fids = len(damages)
+            fids_con_prediccion = sum(1 for d in damages if d != 0)
+            print(f"[PRUEBA] {fname}: {fids_con_prediccion}/{total_fids} FIDs tienen predicción (resto = 0)")
         # DEBUG: Mostrar ejemplos de predicciones y conteo de daños
         #print(f"[DEBUG] {fname} - Ejemplo de predicciones:", damages[:20])
         #print(f"[DEBUG] {fname} - Conteo de daños:", sum(damages))
@@ -160,14 +224,19 @@ def main():
     # Comprimir la carpeta de submission
     zip_base = os.path.abspath(args.output_dir)
     shutil.make_archive(zip_base, 'zip', args.output_dir)
-    print(f"Submission generada en: {args.output_dir}, {zip_base}.zip")
+    
+    if args.prueba:
+        print(f"[PRUEBA] Submission de prueba generada en: {args.output_dir}, {zip_base}.zip")
+        print("[PRUEBA] Modo prueba completado. Para ejecución completa, omitir --prueba")
+    else:
+        print(f"Submission generada en: {args.output_dir}, {zip_base}.zip")
 
     # Mostrar el head de cada archivo .gpkg guardado en la carpeta de salida
     print("\n[INFO] Contenido de los archivos .gpkg generados:")
     for fname in sorted(os.listdir(args.output_dir)):
         if fname.endswith('.gpkg'):
             out_path = os.path.join(args.output_dir, fname)
-            gdf = gpd.read_file(out_path)
+            gdf = load_gpkg_with_fiona(out_path)
             # Mostrar recuento de damaged=0 y damaged=1
             count_0 = (gdf['damaged'] == 0).sum()
             count_1 = (gdf['damaged'] == 1).sum()

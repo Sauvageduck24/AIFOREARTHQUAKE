@@ -151,25 +151,27 @@ class EarthquakeTileDataset(Dataset):
             # Ahora concatenar
             image = np.concatenate([pre_image, post_image], axis=0)
             
-            # Crear máscara de atención que se repite para cada canal
-            # La máscara debe tener el mismo número de canales que la imagen
-            pre_mask_expanded = np.repeat(pre_mask, pre_image.shape[0], axis=0)  # Repetir para cada canal de pre
-            post_mask_expanded = np.repeat(post_mask, post_image.shape[0], axis=0)  # Repetir para cada canal de post
-            mask = np.concatenate([pre_mask_expanded, post_mask_expanded], axis=0)
+            # Crear máscara de atención con 2 canales: [pre_mask, post_mask]
+            # El modelo espera building_mask con shape [B, 2, H, W]
+            mask = np.concatenate([pre_mask, post_mask], axis=0)  # [2, H, W]
             
         elif self.mode == 'pre_only':
             image = pre_image
-            # Repetir la máscara para cada canal
-            mask = np.repeat(pre_mask, pre_image.shape[0], axis=0)
+            # Para pre_only, crear máscara con 2 canales: [pre_mask, zeros]
+            # El modelo siempre espera 2 canales
+            zero_mask = np.zeros_like(pre_mask)
+            mask = np.concatenate([pre_mask, zero_mask], axis=0)  # [2, H, W]
         elif self.mode == 'post_only':
             image = post_image
-            # Repetir la máscara para cada canal
-            mask = np.repeat(post_mask, post_image.shape[0], axis=0)
+            # Para post_only, crear máscara con 2 canales: [zeros, post_mask]
+            # El modelo siempre espera 2 canales
+            zero_mask = np.zeros_like(post_mask)
+            mask = np.concatenate([zero_mask, post_mask], axis=0)  # [2, H, W]
         else:
             raise ValueError(f"Modo no soportado: {self.mode}")
         
-        # Verificar que image y mask tengan el mismo número de canales
-        assert image.shape[0] == mask.shape[0], f"Image channels ({image.shape[0]}) != mask channels ({mask.shape[0]})"
+        # Verificar que mask tenga 2 canales como espera el modelo
+        assert mask.shape[0] == 2, f"Mask debe tener 2 canales, pero tiene {mask.shape[0]}"
         
         # Normalización robusta según dtype
         if image.dtype == np.uint16:

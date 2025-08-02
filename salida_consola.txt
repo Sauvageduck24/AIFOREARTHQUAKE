@@ -1,0 +1,717 @@
+[INFO] Procesamiento co& C:/Users/pablo/anaconda3/envs/geoenv/python.exe d:/AIFOREARTHQUAKE/src/preprocess.py --data-root D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full --country Afghanistan --loglevel DEBUG
+Columnas disponibles en el esquema: ['damaged']
+[DEBUG] Columnas disponibles en el esquema: ['damaged']
+No se encontraron columnas fid_*, usando ID de Fiona
+[INFO] No se encontraron columnas fid_*, usando ID de Fiona
+Asignados 818 IDs a la columna 'id'
+[INFO] Asignados 818 IDs a la columna 'id'
+Columnas en D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area1_Training.gpkg: ['geometry', 'damaged', 'id'] 
+[DEBUG] Columnas en D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area1_Training.gpkg: ['geometry', 'damaged', 'id']
+Agrupando 42 items...
+[DEBUG] Agrupando 42 items...
+Agregada escena OTRO: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated -> DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated -> DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+Agregada escena MS: WV02N34_323333E061_9597222023101800000000MS00-calibrated -> WV02N34_3230E061_9590_20231018
+[DEBUG] Agregada escena MS: WV02N34_323333E061_9597222023101800000000MS00-calibrated -> WV02N34_3230E061_9590_20231018
+Agregada escena PN: WV02N34_496250E061_9423612023101800000000PN00-calibrated -> WV02N34_4960E061_9420_20231018
+[DEBUG] Agregada escena PN: WV02N34_496250E061_9423612023101800000000PN00-calibrated -> WV02N34_4960E061_9420_20231018
+Agregada escena MS: GE01N34_369583E062_0902772023100900000000MS00-calibrated -> GE01N34_369583E062_0902772023100900000000
+[DEBUG] Agregada escena MS: GE01N34_369583E062_0902772023100900000000MS00-calibrated -> GE01N34_369583E062_0902772023100900000000
+Agregada escena MS: WV03N34_394305E061_9969442023091700000000MS00-calibrated -> WV03N34_3940E061_9960_20230917
+[DEBUG] Agregada escena MS: WV03N34_394305E061_9969442023091700000000MS00-calibrated -> WV03N34_3940E061_9960_20230917
+Agregada escena MS: WV02N34_386944E061_9961112022100400000000MS00-calibrated -> WV02N34_3860E061_9960_20221004
+[DEBUG] Agregada escena MS: WV02N34_386944E061_9961112022100400000000MS00-calibrated -> WV02N34_3860E061_9960_20221004
+Agregada escena PN: WV02N34_598611E061_9422222023101800000000PN00-calibrated -> WV02N34_5980E061_9420_20231018
+[DEBUG] Agregada escena PN: WV02N34_598611E061_9422222023101800000000PN00-calibrated -> WV02N34_5980E061_9420_20231018
+Agregada escena MS: WV02N34_266388E062_1358332023012100000000MS00-calibrated -> WV02N34_2660E062_1350_20230121
+[DEBUG] Agregada escena MS: WV02N34_266388E062_1358332023012100000000MS00-calibrated -> WV02N34_2660E062_1350_20230121
+Agregada escena OTRO: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated -> GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated -> GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+Agregada escena OTRO: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated -> GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated -> GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+Agregada escena MS: WV02N34_423194E062_1475002023101800000000MS00-calibrated -> WV02N34_4230E062_1470_20231018
+[DEBUG] Agregada escena MS: WV02N34_423194E062_1475002023101800000000MS00-calibrated -> WV02N34_4230E062_1470_20231018
+Agregada escena MS: WV02N34_355833E062_1479162023101800000000MS00-calibrated -> WV02N34_3550E062_1470_20231018
+[DEBUG] Agregada escena MS: WV02N34_355833E062_1479162023101800000000MS00-calibrated -> WV02N34_3550E062_1470_20231018
+Agregada escena PN: GE01N34_369583E062_0902772023100900000000PN00-calibrated -> GE01N34_369583E062_0902772023100900000000
+[DEBUG] Agregada escena PN: GE01N34_369583E062_0902772023100900000000PN00-calibrated -> GE01N34_369583E062_0902772023100900000000
+Agregada escena MS: WV02N34_409861E061_9594442023101800000000MS00-calibrated -> WV02N34_4090E061_9590_20231018
+[DEBUG] Agregada escena MS: WV02N34_409861E061_9594442023101800000000MS00-calibrated -> WV02N34_4090E061_9590_20231018
+Agregada escena MS: WV02N34_533750E062_2648612023102400000000MS00-calibrated -> WV02N34_5330E062_2640_20231024
+[DEBUG] Agregada escena MS: WV02N34_533750E062_2648612023102400000000MS00-calibrated -> WV02N34_5330E062_2640_20231024
+Agregada escena PN: WV02N34_344166E061_9650002023101300000000PN00-calibrated -> WV02N34_3440E061_9650_20231013
+[DEBUG] Agregada escena PN: WV02N34_344166E061_9650002023101300000000PN00-calibrated -> WV02N34_3440E061_9650_20231013
+Agregada escena OTRO: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated -> GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated -> GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+Agregada escena OTRO: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated -> DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated -> DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+Agregada escena PN: WV02N34_533750E062_2648612023102400000000PN00-calibrated -> WV02N34_5330E062_2640_20231024
+[DEBUG] Agregada escena PN: WV02N34_533750E062_2648612023102400000000PN00-calibrated -> WV02N34_5330E062_2640_20231024
+Agregada escena OTRO: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated -> DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated -> DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+Agregada escena MS: WV02N34_598611E061_9422222023101800000000MS00-calibrated -> WV02N34_5980E061_9420_20231018
+[DEBUG] Agregada escena MS: WV02N34_598611E061_9422222023101800000000MS00-calibrated -> WV02N34_5980E061_9420_20231018
+Agregada escena PN: WV02N34_324027E062_3175002023101800000000PN00-calibrated -> WV02N34_3240E062_3170_20231018
+[DEBUG] Agregada escena PN: WV02N34_324027E062_3175002023101800000000PN00-calibrated -> WV02N34_3240E062_3170_20231018
+Agregada escena OTRO: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated -> DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated -> DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+Agregada escena MS: WV02N34_394027E062_3172222023101800000000MS00-calibrated -> WV02N34_3940E062_3170_20231018
+[DEBUG] Agregada escena MS: WV02N34_394027E062_3172222023101800000000MS00-calibrated -> WV02N34_3940E062_3170_20231018
+Agregada escena OTRO: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated -> DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated -> DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+Agregada escena OTRO: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated -> GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated -> GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+Agregada escena PN: WV02N34_324027E062_1490272023101300000000PN00-calibrated -> WV02N34_3240E062_1490_20231013
+[DEBUG] Agregada escena PN: WV02N34_324027E062_1490272023101300000000PN00-calibrated -> WV02N34_3240E062_1490_20231013
+Agregada escena MS: WV02N34_324027E062_3176382023101800000000MS00-calibrated -> WV02N34_3240E062_3170_20231018
+[DEBUG] Agregada escena MS: WV02N34_324027E062_3176382023101800000000MS00-calibrated -> WV02N34_3240E062_3170_20231018
+Agregada escena MS: WV02N34_344166E061_9650002023101300000000MS00-calibrated -> WV02N34_3440E061_9650_20231013
+[DEBUG] Agregada escena MS: WV02N34_344166E061_9650002023101300000000MS00-calibrated -> WV02N34_3440E061_9650_20231013
+Agregada escena PN: WV03N34_394305E061_9968052023091700000000PN00-calibrated -> WV03N34_3940E061_9960_20230917
+[DEBUG] Agregada escena PN: WV03N34_394305E061_9968052023091700000000PN00-calibrated -> WV03N34_3940E061_9960_20230917
+Agregada escena OTRO: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated -> GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+[DEBUG] Agregada escena OTRO: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated -> GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+Agregada escena OTRO: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated -> DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated -> DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+Agregada escena MS: WV02N34_496250E061_9425002023101800000000MS00-calibrated -> WV02N34_4960E061_9420_20231018
+[DEBUG] Agregada escena MS: WV02N34_496250E061_9425002023101800000000MS00-calibrated -> WV02N34_4960E061_9420_20231018
+Agregada escena OTRO: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated -> DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated -> DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+Agregada escena OTRO: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated -> GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated -> GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+Agregada escena OTRO: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated -> GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+[DEBUG] Agregada escena OTRO: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated -> GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+Agregada escena MS: WV02N34_324027E062_1490272023101300000000MS00-calibrated -> WV02N34_3240E062_1490_20231013
+[DEBUG] Agregada escena MS: WV02N34_324027E062_1490272023101300000000MS00-calibrated -> WV02N34_3240E062_1490_20231013
+Agregada escena MS: WV02N34_393611E062_1362502023012100000000MS00-calibrated -> WV02N34_3930E062_1360_20230121
+[DEBUG] Agregada escena MS: WV02N34_393611E062_1362502023012100000000MS00-calibrated -> WV02N34_3930E062_1360_20230121
+Agregada escena MS: GE01N34_522916E061_9370832021081500000000MS00-calibrated -> GE01N34_522916E061_9370832021081500000000
+[DEBUG] Agregada escena MS: GE01N34_522916E061_9370832021081500000000MS00-calibrated -> GE01N34_522916E061_9370832021081500000000
+Agregada escena PN: GE01N34_522916E061_9370832021081500000000PN00-calibrated -> GE01N34_522916E061_9370832021081500000000
+[DEBUG] Agregada escena PN: GE01N34_522916E061_9370832021081500000000PN00-calibrated -> GE01N34_522916E061_9370832021081500000000
+Agregada escena MS: GE01N34_723194E061_7998612021120800000000MS00-calibrated -> GE01N34_723194E061_7998612021120800000000
+[DEBUG] Agregada escena MS: GE01N34_723194E061_7998612021120800000000MS00-calibrated -> GE01N34_723194E061_7998612021120800000000
+Agregada escena PN: GE01N34_723194E061_7998612021120800000000PN00-calibrated -> GE01N34_723194E061_7998612021120800000000
+[DEBUG] Agregada escena PN: GE01N34_723194E061_7998612021120800000000PN00-calibrated -> GE01N34_723194E061_7998612021120800000000
+Procesando 32 grupos de escenas...
+[DEBUG] Procesando 32 grupos de escenas...
+Grupo DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+Grupo WV02N34_3230E061_9590_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3230E061_9590_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3230E061_9590_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3230E061_9590_20231018
+Grupo WV02N34_4960E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_4960E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_4960E061_9420_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_4960E061_9420_20231018
+Grupo GE01N34_369583E062_0902772023100900000000: WorldView=False, items=['MS', 'PN']
+[DEBUG] Grupo GE01N34_369583E062_0902772023100900000000: WorldView=False, items=['MS', 'PN']
+Agregadas todas las escenas no-WorldView: GE01N34_369583E062_0902772023100900000000
+[DEBUG] Agregadas todas las escenas no-WorldView: GE01N34_369583E062_0902772023100900000000
+Grupo WV03N34_3940E061_9960_20230917: WorldView=True, items=['MS', 'PN']
+[DEBUG] Grupo WV03N34_3940E061_9960_20230917: WorldView=True, items=['MS', 'PN']
+Agregada escena WorldView MS: WV03N34_3940E061_9960_20230917
+[DEBUG] Agregada escena WorldView MS: WV03N34_3940E061_9960_20230917
+Grupo WV02N34_3860E061_9960_20221004: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3860E061_9960_20221004: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3860E061_9960_20221004
+[DEBUG] Agregada escena WorldView MS: WV02N34_3860E061_9960_20221004
+Grupo WV02N34_5980E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_5980E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_5980E061_9420_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_5980E061_9420_20231018
+Grupo WV02N34_2660E062_1350_20230121: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_2660E062_1350_20230121: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_2660E062_1350_20230121
+[DEBUG] Agregada escena WorldView MS: WV02N34_2660E062_1350_20230121
+Grupo GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+Grupo GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+Grupo WV02N34_4230E062_1470_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_4230E062_1470_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_4230E062_1470_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_4230E062_1470_20231018
+Grupo WV02N34_3550E062_1470_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3550E062_1470_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3550E062_1470_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3550E062_1470_20231018
+Grupo WV02N34_4090E061_9590_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_4090E061_9590_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_4090E061_9590_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_4090E061_9590_20231018
+Grupo WV02N34_5330E062_2640_20231024: WorldView=True, items=['MS', 'PN']
+[DEBUG] Grupo WV02N34_5330E062_2640_20231024: WorldView=True, items=['MS', 'PN']
+Agregada escena WorldView MS: WV02N34_5330E062_2640_20231024
+[DEBUG] Agregada escena WorldView MS: WV02N34_5330E062_2640_20231024
+Grupo WV02N34_3440E061_9650_20231013: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_3440E061_9650_20231013: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_3440E061_9650_20231013
+[DEBUG] Agregada escena WorldView MS: WV02N34_3440E061_9650_20231013
+Grupo GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+Grupo DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+Grupo DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+Grupo WV02N34_3240E062_3170_20231018: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_3240E062_3170_20231018: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_3240E062_3170_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3240E062_3170_20231018
+Grupo DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+Grupo WV02N34_3940E062_3170_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3940E062_3170_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3940E062_3170_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3940E062_3170_20231018
+Grupo DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+Grupo GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+Grupo WV02N34_3240E062_1490_20231013: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_3240E062_1490_20231013: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_3240E062_1490_20231013
+[DEBUG] Agregada escena WorldView MS: WV02N34_3240E062_1490_20231013
+Grupo GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+Grupo DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+Grupo DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+Grupo GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+Grupo GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+Grupo WV02N34_3930E062_1360_20230121: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3930E062_1360_20230121: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3930E062_1360_20230121
+[DEBUG] Agregada escena WorldView MS: WV02N34_3930E062_1360_20230121
+Grupo GE01N34_522916E061_9370832021081500000000: WorldView=False, items=['MS', 'PN']
+[DEBUG] Grupo GE01N34_522916E061_9370832021081500000000: WorldView=False, items=['MS', 'PN']
+Agregadas todas las escenas no-WorldView: GE01N34_522916E061_9370832021081500000000
+[DEBUG] Agregadas todas las escenas no-WorldView: GE01N34_522916E061_9370832021081500000000
+Grupo GE01N34_723194E061_7998612021120800000000: WorldView=False, items=['MS', 'PN']
+[DEBUG] Grupo GE01N34_723194E061_7998612021120800000000: WorldView=False, items=['MS', 'PN']
+Agregadas todas las escenas no-WorldView: GE01N34_723194E061_7998612021120800000000
+[DEBUG] Agregadas todas las escenas no-WorldView: GE01N34_723194E061_7998612021120800000000
+Escena DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena WV02N34_323333E061_9597222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_323333E061_9597222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_496250E061_9425002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_496250E061_9425002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_496250E061_9425002023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_496250E061_9425002023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena GE01N34_369583E062_0902772023100900000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_369583E062_0902772023100900000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Escena GE01N34_369583E062_0902772023100900000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_369583E062_0902772023100900000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Escena WV03N34_394305E061_9969442023091700000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV03N34_394305E061_9969442023091700000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_386944E061_9961112022100400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_386944E061_9961112022100400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_598611E061_9422222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_598611E061_9422222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_598611E061_9422222023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_598611E061_9422222023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena WV02N34_266388E062_1358332023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_266388E062_1358332023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated coincide con satélite 'all' (patrón: gf2)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena WV02N34_423194E062_1475002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_423194E062_1475002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_355833E062_1479162023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_355833E062_1479162023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_409861E061_9594442023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_409861E061_9594442023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_533750E062_2648612023102400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_533750E062_2648612023102400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_344166E061_9650002023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_344166E061_9650002023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena WV02N34_324027E062_3176382023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_324027E062_3176382023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena WV02N34_394027E062_3172222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_394027E062_3172222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated coincide con satélite 'all' (patrón: gf2)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated\Optical_Calibration\overview-pan_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated\Optical_Calibration\overview-pan_aligned.tif
+Escena WV02N34_324027E062_1490272023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_324027E062_1490272023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena WV02N34_393611E062_1362502023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_393611E062_1362502023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GE01N34_522916E061_9370832021081500000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_522916E061_9370832021081500000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Escena GE01N34_522916E061_9370832021081500000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_522916E061_9370832021081500000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_522916E061_9370832021081500000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_522916E061_9370832021081500000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+Escena GE01N34_723194E061_7998612021120800000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_723194E061_7998612021120800000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena GE01N34_723194E061_7998612021120800000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_723194E061_7998612021120800000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+Escenas encontradas: 10
+[INFO] Escenas encontradas: 10
+  1. WV02N34_496250E061_9425002023101800000000MS00-calibrated (GSD: 2.23m, fecha: 2023-10-18)
+[INFO]   1. WV02N34_496250E061_9425002023101800000000MS00-calibrated (GSD: 2.23m, fecha: 2023-10-18)
+  2. WV02N34_598611E061_9422222023101800000000MS00-calibrated (GSD: 2.38m, fecha: 2023-10-18)
+[INFO]   2. WV02N34_598611E061_9422222023101800000000MS00-calibrated (GSD: 2.38m, fecha: 2023-10-18)
+  3. GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated (GSD: 3.39m, fecha: 2021-02-14)
+[INFO]   3. GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated (GSD: 3.39m, fecha: 2021-02-14)
+  4. WV02N34_409861E061_9594442023101800000000MS00-calibrated (GSD: 3.03m, fecha: 2023-10-18)
+[INFO]   4. WV02N34_409861E061_9594442023101800000000MS00-calibrated (GSD: 3.03m, fecha: 2023-10-18)
+  5. DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+[INFO]   5. DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+  6. DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+[INFO]   6. DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+  7. GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated (GSD: 0.85m, fecha: 2023-10-13)
+[INFO]   7. GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated (GSD: 0.85m, fecha: 2023-10-13)
+  8. GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated (GSD: 0.97m, fecha: 2023-10-18)
+[INFO]   8. GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated (GSD: 0.97m, fecha: 2023-10-18)
+  9. GE01N34_522916E061_9370832021081500000000MS00-calibrated (GSD: 1.83m, fecha: 2021-08-15)
+[INFO]   9. GE01N34_522916E061_9370832021081500000000MS00-calibrated (GSD: 1.83m, fecha: 2021-08-15)
+  10. GE01N34_522916E061_9370832021081500000000PN00-calibrated (GSD: 0.44m, fecha: 2021-08-15)
+[INFO]   10. GE01N34_522916E061_9370832021081500000000PN00-calibrated (GSD: 0.44m, fecha: 2021-08-15)
+Análisis de GSD de 10 escenas:
+[INFO] Análisis de GSD de 10 escenas:
+  Mínimo: 0.44m, Máximo: 3.39m
+[INFO]   Mínimo: 0.44m, Máximo: 3.39m
+  Mediana: 1.40m, Media: 1.61m
+[INFO]   Mediana: 1.40m, Media: 1.61m
+Sensor predominante: worldview
+[INFO] Sensor predominante: worldview
+WorldView detectado: TARGET_GSD conservador = 1.00m
+[INFO] WorldView detectado: TARGET_GSD conservador = 1.00m
+TARGET_GSD final determinado automáticamente: 1.00m (estrategia conservadora)
+[INFO] TARGET_GSD final determinado automáticamente: 1.00m (estrategia conservadora)
+Preparados 818 tasks para procesamiento
+[DEBUG] Preparados 818 tasks para procesamiento
+Edificios Afghanistan_Area1_Training.gpkg: 100%|██████████████████████████████████████████████████████████████████████████████████████| 818/818 [00:08<00:00, 98.96it/s]
+Resumen Afghanistan_Area1_Training.gpkg: 818 tiles procesados exitosamente
+[INFO] Resumen Afghanistan_Area1_Training.gpkg: 818 tiles procesados exitosamente
+⚠️  Tiles con problemas de cobertura:
+[WARNING] ⚠️  Tiles con problemas de cobertura:
+   - Sin escena PRE: 3
+[WARNING]    - Sin escena PRE: 3
+   - Sin escena POST: 0
+[WARNING]    - Sin escena POST: 0
+   - Sin ambas escenas: 0
+[WARNING]    - Sin ambas escenas: 0
+   - Porcentaje con problemas: 0.4%
+[WARNING]    - Porcentaje con problemas: 0.4%
+Tiles generados para D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area1_Training.gpkg: 818
+[INFO] Tiles generados para D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area1_Training.gpkg: 818
+✅ Afghanistan_Area1_Training.gpkg: 818 tiles procesados exitosamente
+[INFO] ✅ Afghanistan_Area1_Training.gpkg: 818 tiles procesados exitosamente
+Columnas disponibles en el esquema: ['damaged']
+[DEBUG] Columnas disponibles en el esquema: ['damaged']
+No se encontraron columnas fid_*, usando ID de Fiona
+[INFO] No se encontraron columnas fid_*, usando ID de Fiona
+Asignados 494 IDs a la columna 'id'
+[INFO] Asignados 494 IDs a la columna 'id'
+Columnas en D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area2_Training.gpkg: ['geometry', 'damaged', 'id'] 
+[DEBUG] Columnas en D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area2_Training.gpkg: ['geometry', 'damaged', 'id']
+Agrupando 42 items...
+[DEBUG] Agrupando 42 items...
+Agregada escena OTRO: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated -> DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated -> DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+Agregada escena MS: WV02N34_323333E061_9597222023101800000000MS00-calibrated -> WV02N34_3230E061_9590_20231018
+[DEBUG] Agregada escena MS: WV02N34_323333E061_9597222023101800000000MS00-calibrated -> WV02N34_3230E061_9590_20231018
+Agregada escena PN: WV02N34_496250E061_9423612023101800000000PN00-calibrated -> WV02N34_4960E061_9420_20231018
+[DEBUG] Agregada escena PN: WV02N34_496250E061_9423612023101800000000PN00-calibrated -> WV02N34_4960E061_9420_20231018
+Agregada escena MS: GE01N34_369583E062_0902772023100900000000MS00-calibrated -> GE01N34_369583E062_0902772023100900000000
+[DEBUG] Agregada escena MS: GE01N34_369583E062_0902772023100900000000MS00-calibrated -> GE01N34_369583E062_0902772023100900000000
+Agregada escena MS: WV03N34_394305E061_9969442023091700000000MS00-calibrated -> WV03N34_3940E061_9960_20230917
+[DEBUG] Agregada escena MS: WV03N34_394305E061_9969442023091700000000MS00-calibrated -> WV03N34_3940E061_9960_20230917
+Agregada escena MS: WV02N34_386944E061_9961112022100400000000MS00-calibrated -> WV02N34_3860E061_9960_20221004
+[DEBUG] Agregada escena MS: WV02N34_386944E061_9961112022100400000000MS00-calibrated -> WV02N34_3860E061_9960_20221004
+Agregada escena PN: WV02N34_598611E061_9422222023101800000000PN00-calibrated -> WV02N34_5980E061_9420_20231018
+[DEBUG] Agregada escena PN: WV02N34_598611E061_9422222023101800000000PN00-calibrated -> WV02N34_5980E061_9420_20231018
+Agregada escena MS: WV02N34_266388E062_1358332023012100000000MS00-calibrated -> WV02N34_2660E062_1350_20230121
+[DEBUG] Agregada escena MS: WV02N34_266388E062_1358332023012100000000MS00-calibrated -> WV02N34_2660E062_1350_20230121
+Agregada escena OTRO: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated -> GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated -> GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+Agregada escena OTRO: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated -> GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated -> GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+Agregada escena MS: WV02N34_423194E062_1475002023101800000000MS00-calibrated -> WV02N34_4230E062_1470_20231018
+[DEBUG] Agregada escena MS: WV02N34_423194E062_1475002023101800000000MS00-calibrated -> WV02N34_4230E062_1470_20231018
+Agregada escena MS: WV02N34_355833E062_1479162023101800000000MS00-calibrated -> WV02N34_3550E062_1470_20231018
+[DEBUG] Agregada escena MS: WV02N34_355833E062_1479162023101800000000MS00-calibrated -> WV02N34_3550E062_1470_20231018
+Agregada escena PN: GE01N34_369583E062_0902772023100900000000PN00-calibrated -> GE01N34_369583E062_0902772023100900000000
+[DEBUG] Agregada escena PN: GE01N34_369583E062_0902772023100900000000PN00-calibrated -> GE01N34_369583E062_0902772023100900000000
+Agregada escena MS: WV02N34_409861E061_9594442023101800000000MS00-calibrated -> WV02N34_4090E061_9590_20231018
+[DEBUG] Agregada escena MS: WV02N34_409861E061_9594442023101800000000MS00-calibrated -> WV02N34_4090E061_9590_20231018
+Agregada escena MS: WV02N34_533750E062_2648612023102400000000MS00-calibrated -> WV02N34_5330E062_2640_20231024
+[DEBUG] Agregada escena MS: WV02N34_533750E062_2648612023102400000000MS00-calibrated -> WV02N34_5330E062_2640_20231024
+Agregada escena PN: WV02N34_344166E061_9650002023101300000000PN00-calibrated -> WV02N34_3440E061_9650_20231013
+[DEBUG] Agregada escena PN: WV02N34_344166E061_9650002023101300000000PN00-calibrated -> WV02N34_3440E061_9650_20231013
+Agregada escena OTRO: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated -> GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated -> GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+Agregada escena OTRO: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated -> DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated -> DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+Agregada escena PN: WV02N34_533750E062_2648612023102400000000PN00-calibrated -> WV02N34_5330E062_2640_20231024
+[DEBUG] Agregada escena PN: WV02N34_533750E062_2648612023102400000000PN00-calibrated -> WV02N34_5330E062_2640_20231024
+Agregada escena OTRO: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated -> DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated -> DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+Agregada escena MS: WV02N34_598611E061_9422222023101800000000MS00-calibrated -> WV02N34_5980E061_9420_20231018
+[DEBUG] Agregada escena MS: WV02N34_598611E061_9422222023101800000000MS00-calibrated -> WV02N34_5980E061_9420_20231018
+Agregada escena PN: WV02N34_324027E062_3175002023101800000000PN00-calibrated -> WV02N34_3240E062_3170_20231018
+[DEBUG] Agregada escena PN: WV02N34_324027E062_3175002023101800000000PN00-calibrated -> WV02N34_3240E062_3170_20231018
+Agregada escena OTRO: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated -> DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated -> DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+Agregada escena MS: WV02N34_394027E062_3172222023101800000000MS00-calibrated -> WV02N34_3940E062_3170_20231018
+[DEBUG] Agregada escena MS: WV02N34_394027E062_3172222023101800000000MS00-calibrated -> WV02N34_3940E062_3170_20231018
+Agregada escena OTRO: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated -> DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated -> DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+Agregada escena OTRO: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated -> GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated -> GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+Agregada escena PN: WV02N34_324027E062_1490272023101300000000PN00-calibrated -> WV02N34_3240E062_1490_20231013
+[DEBUG] Agregada escena PN: WV02N34_324027E062_1490272023101300000000PN00-calibrated -> WV02N34_3240E062_1490_20231013
+Agregada escena MS: WV02N34_324027E062_3176382023101800000000MS00-calibrated -> WV02N34_3240E062_3170_20231018
+[DEBUG] Agregada escena MS: WV02N34_324027E062_3176382023101800000000MS00-calibrated -> WV02N34_3240E062_3170_20231018
+Agregada escena MS: WV02N34_344166E061_9650002023101300000000MS00-calibrated -> WV02N34_3440E061_9650_20231013
+[DEBUG] Agregada escena MS: WV02N34_344166E061_9650002023101300000000MS00-calibrated -> WV02N34_3440E061_9650_20231013
+Agregada escena PN: WV03N34_394305E061_9968052023091700000000PN00-calibrated -> WV03N34_3940E061_9960_20230917
+[DEBUG] Agregada escena PN: WV03N34_394305E061_9968052023091700000000PN00-calibrated -> WV03N34_3940E061_9960_20230917
+Agregada escena OTRO: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated -> GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+[DEBUG] Agregada escena OTRO: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated -> GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+Agregada escena OTRO: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated -> DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated -> DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+Agregada escena MS: WV02N34_496250E061_9425002023101800000000MS00-calibrated -> WV02N34_4960E061_9420_20231018
+[DEBUG] Agregada escena MS: WV02N34_496250E061_9425002023101800000000MS00-calibrated -> WV02N34_4960E061_9420_20231018
+Agregada escena OTRO: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated -> DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+[DEBUG] Agregada escena OTRO: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated -> DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+Agregada escena OTRO: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated -> GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+[DEBUG] Agregada escena OTRO: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated -> GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+Agregada escena OTRO: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated -> GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+[DEBUG] Agregada escena OTRO: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated -> GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+Agregada escena MS: WV02N34_324027E062_1490272023101300000000MS00-calibrated -> WV02N34_3240E062_1490_20231013
+[DEBUG] Agregada escena MS: WV02N34_324027E062_1490272023101300000000MS00-calibrated -> WV02N34_3240E062_1490_20231013
+Agregada escena MS: WV02N34_393611E062_1362502023012100000000MS00-calibrated -> WV02N34_3930E062_1360_20230121
+[DEBUG] Agregada escena MS: WV02N34_393611E062_1362502023012100000000MS00-calibrated -> WV02N34_3930E062_1360_20230121
+Agregada escena MS: GE01N34_522916E061_9370832021081500000000MS00-calibrated -> GE01N34_522916E061_9370832021081500000000
+[DEBUG] Agregada escena MS: GE01N34_522916E061_9370832021081500000000MS00-calibrated -> GE01N34_522916E061_9370832021081500000000
+Agregada escena PN: GE01N34_522916E061_9370832021081500000000PN00-calibrated -> GE01N34_522916E061_9370832021081500000000
+[DEBUG] Agregada escena PN: GE01N34_522916E061_9370832021081500000000PN00-calibrated -> GE01N34_522916E061_9370832021081500000000
+Agregada escena MS: GE01N34_723194E061_7998612021120800000000MS00-calibrated -> GE01N34_723194E061_7998612021120800000000
+[DEBUG] Agregada escena MS: GE01N34_723194E061_7998612021120800000000MS00-calibrated -> GE01N34_723194E061_7998612021120800000000
+Agregada escena PN: GE01N34_723194E061_7998612021120800000000PN00-calibrated -> GE01N34_723194E061_7998612021120800000000
+[DEBUG] Agregada escena PN: GE01N34_723194E061_7998612021120800000000PN00-calibrated -> GE01N34_723194E061_7998612021120800000000
+Procesando 32 grupos de escenas...
+[DEBUG] Procesando 32 grupos de escenas...
+Grupo DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063
+Grupo WV02N34_3230E061_9590_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3230E061_9590_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3230E061_9590_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3230E061_9590_20231018
+Grupo WV02N34_4960E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_4960E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_4960E061_9420_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_4960E061_9420_20231018
+Grupo GE01N34_369583E062_0902772023100900000000: WorldView=False, items=['MS', 'PN']
+[DEBUG] Grupo GE01N34_369583E062_0902772023100900000000: WorldView=False, items=['MS', 'PN']
+Agregadas todas las escenas no-WorldView: GE01N34_369583E062_0902772023100900000000
+[DEBUG] Agregadas todas las escenas no-WorldView: GE01N34_369583E062_0902772023100900000000
+Grupo WV03N34_3940E061_9960_20230917: WorldView=True, items=['MS', 'PN']
+[DEBUG] Grupo WV03N34_3940E061_9960_20230917: WorldView=True, items=['MS', 'PN']
+Agregada escena WorldView MS: WV03N34_3940E061_9960_20230917
+[DEBUG] Agregada escena WorldView MS: WV03N34_3940E061_9960_20230917
+Grupo WV02N34_3860E061_9960_20221004: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3860E061_9960_20221004: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3860E061_9960_20221004
+[DEBUG] Agregada escena WorldView MS: WV02N34_3860E061_9960_20221004
+Grupo WV02N34_5980E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_5980E061_9420_20231018: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_5980E061_9420_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_5980E061_9420_20231018
+Grupo WV02N34_2660E062_1350_20230121: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_2660E062_1350_20230121: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_2660E062_1350_20230121
+[DEBUG] Agregada escena WorldView MS: WV02N34_2660E062_1350_20230121
+Grupo GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001
+Grupo GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097
+Grupo WV02N34_4230E062_1470_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_4230E062_1470_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_4230E062_1470_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_4230E062_1470_20231018
+Grupo WV02N34_3550E062_1470_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3550E062_1470_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3550E062_1470_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3550E062_1470_20231018
+Grupo WV02N34_4090E061_9590_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_4090E061_9590_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_4090E061_9590_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_4090E061_9590_20231018
+Grupo WV02N34_5330E062_2640_20231024: WorldView=True, items=['MS', 'PN']
+[DEBUG] Grupo WV02N34_5330E062_2640_20231024: WorldView=True, items=['MS', 'PN']
+Agregada escena WorldView MS: WV02N34_5330E062_2640_20231024
+[DEBUG] Agregada escena WorldView MS: WV02N34_5330E062_2640_20231024
+Grupo WV02N34_3440E061_9650_20231013: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_3440E061_9650_20231013: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_3440E061_9650_20231013
+[DEBUG] Agregada escena WorldView MS: WV02N34_3440E061_9650_20231013
+Grupo GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001
+Grupo DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988
+Grupo DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662
+Grupo WV02N34_3240E062_3170_20231018: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_3240E062_3170_20231018: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_3240E062_3170_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3240E062_3170_20231018
+Grupo DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552
+Grupo WV02N34_3940E062_3170_20231018: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3940E062_3170_20231018: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3940E062_3170_20231018
+[DEBUG] Agregada escena WorldView MS: WV02N34_3940E062_3170_20231018
+Grupo DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422
+Grupo GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001
+Grupo WV02N34_3240E062_1490_20231013: WorldView=True, items=['PN', 'MS']
+[DEBUG] Grupo WV02N34_3240E062_1490_20231013: WorldView=True, items=['PN', 'MS']
+Agregada escena WorldView MS: WV02N34_3240E062_1490_20231013
+[DEBUG] Agregada escena WorldView MS: WV02N34_3240E062_1490_20231013
+Grupo GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001
+Grupo DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406
+Grupo DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858: WorldView=False, items=['OTRO']
+[DEBUG] Grupo DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+[DEBUG] Agregadas todas las escenas no-WorldView: DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858
+Grupo GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106
+Grupo GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839: WorldView=False, items=['OTRO']
+[DEBUG] Grupo GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839: WorldView=False, items=['OTRO']
+Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+[DEBUG] Agregadas todas las escenas no-WorldView: GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839
+Grupo WV02N34_3930E062_1360_20230121: WorldView=True, items=['MS']
+[DEBUG] Grupo WV02N34_3930E062_1360_20230121: WorldView=True, items=['MS']
+Agregada escena WorldView MS: WV02N34_3930E062_1360_20230121
+[DEBUG] Agregada escena WorldView MS: WV02N34_3930E062_1360_20230121
+Grupo GE01N34_522916E061_9370832021081500000000: WorldView=False, items=['MS', 'PN']
+[DEBUG] Grupo GE01N34_522916E061_9370832021081500000000: WorldView=False, items=['MS', 'PN']
+Agregadas todas las escenas no-WorldView: GE01N34_522916E061_9370832021081500000000
+[DEBUG] Agregadas todas las escenas no-WorldView: GE01N34_522916E061_9370832021081500000000
+Grupo GE01N34_723194E061_7998612021120800000000: WorldView=False, items=['MS', 'PN']
+[DEBUG] Grupo GE01N34_723194E061_7998612021120800000000: WorldView=False, items=['MS', 'PN']
+Agregadas todas las escenas no-WorldView: GE01N34_723194E061_7998612021120800000000
+[DEBUG] Agregadas todas las escenas no-WorldView: GE01N34_723194E061_7998612021120800000000
+Escena DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090645097_FR1_PX_E062N34_0314_02063-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena WV02N34_323333E061_9597222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_323333E061_9597222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_496250E061_9425002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_496250E061_9425002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_496250E061_9425002023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_496250E061_9425002023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena GE01N34_369583E062_0902772023100900000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_369583E062_0902772023100900000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Escena GE01N34_369583E062_0902772023100900000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_369583E062_0902772023100900000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Escena WV03N34_394305E061_9969442023091700000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV03N34_394305E061_9969442023091700000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_386944E061_9961112022100400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_386944E061_9961112022100400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_598611E061_9422222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_598611E061_9422222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_598611E061_9422222023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\WV02N34_598611E061_9422222023101800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena WV02N34_266388E062_1358332023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_266388E062_1358332023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.3_N34.3_20231018_L1A13401152001-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated coincide con satélite 'all' (patrón: gf2)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.1_N34.5_20210214_L1A0005478097-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena WV02N34_423194E062_1475002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_423194E062_1475002023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_355833E062_1479162023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_355833E062_1479162023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_409861E061_9594442023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_409861E061_9594442023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_533750E062_2648612023102400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_533750E062_2648612023102400000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena WV02N34_344166E061_9650002023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_344166E061_9650002023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.0_N34.3_20231013_L1A13387328001-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644596_FR1_PX_E062N34_0114_01988-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090645534_FR1_PX_E061N34_1112_00662-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena WV02N34_324027E062_3176382023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_324027E062_3176382023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090645458_FR1_PX_E062N34_0311_00552-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena WV02N34_394027E062_3172222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_394027E062_3172222023101800000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated coincide con satélite 'all' (patrón: gf2)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated\Optical_Calibration\overview-pan_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GF2_PMS2_E62.0_N34.5_20231013_L1A13387327001-calibrated\Optical_Calibration\overview-pan_aligned.tif
+Escena WV02N34_324027E062_1490272023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_324027E062_1490272023101300000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS1_E62.1_N34.4_20231018_L1A13401386001-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated coincide con satélite 'all' (patrón: ds_phr)
+[DEBUG] Escena DS_PHR1B_202310090644343_FR1_PX_E062N34_0219_01858-calibrated coincide con satélite 'all' (patrón: ds_phr)
+Escena GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS2_E62.1_N34.3_20210214_L1A0005478106-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated coincide con satélite 'all' (patrón: gf2)
+[DEBUG] Escena GF2_PMS1_E62.2_N34.4_20220815_L1A0006673839-calibrated coincide con satélite 'all' (patrón: gf2)
+Escena WV02N34_393611E062_1362502023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+[DEBUG] Escena WV02N34_393611E062_1362502023012100000000MS00-calibrated coincide con satélite 'all' (patrón: wv)
+Escena GE01N34_522916E061_9370832021081500000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_522916E061_9370832021081500000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Escena GE01N34_522916E061_9370832021081500000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_522916E061_9370832021081500000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_522916E061_9370832021081500000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_522916E061_9370832021081500000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+Escena GE01N34_723194E061_7998612021120800000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_723194E061_7998612021120800000000MS00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000MS00-calibrated\Optical_Calibration\overview-trc_aligned.tif
+Escena GE01N34_723194E061_7998612021120800000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+[DEBUG] Escena GE01N34_723194E061_7998612021120800000000PN00-calibrated coincide con satélite 'all' (patrón: geoeye)
+Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+[DEBUG] Archivo alineado encontrado: D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Call_970_Afghanistan\GE01N34_723194E061_7998612021120800000000PN00-calibrated\Optical_Calibration\overview-pan_aligned.tif
+Escenas encontradas: 5
+[INFO] Escenas encontradas: 5
+  1. WV02N34_598611E061_9422222023101800000000MS00-calibrated (GSD: 2.38m, fecha: 2023-10-18)
+[INFO]   1. WV02N34_598611E061_9422222023101800000000MS00-calibrated (GSD: 2.38m, fecha: 2023-10-18)
+  2. DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+[INFO]   2. DS_PHR1B_202310090644523_FR1_PX_E061N34_0916_00422-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+  3. DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+[INFO]   3. DS_PHR1B_202310090644436_FR1_PX_E061N34_1117_01406-calibrated (GSD: 0.50m, fecha: 2023-10-09)
+  4. GE01N34_723194E061_7998612021120800000000MS00-calibrated (GSD: 1.92m, fecha: 2021-12-08)
+[INFO]   4. GE01N34_723194E061_7998612021120800000000MS00-calibrated (GSD: 1.92m, fecha: 2021-12-08)
+  5. GE01N34_723194E061_7998612021120800000000PN00-calibrated (GSD: 0.48m, fecha: 2021-12-08)
+[INFO]   5. GE01N34_723194E061_7998612021120800000000PN00-calibrated (GSD: 0.48m, fecha: 2021-12-08)
+Análisis de GSD de 5 escenas:
+[INFO] Análisis de GSD de 5 escenas:
+  Mínimo: 0.48m, Máximo: 2.38m
+[INFO]   Mínimo: 0.48m, Máximo: 2.38m
+  Mediana: 0.50m, Media: 1.16m
+[INFO]   Mediana: 0.50m, Media: 1.16m
+Sensor predominante: pleiades
+[INFO] Sensor predominante: pleiades
+Pleiades detectado: TARGET_GSD conservador = 0.50m
+[INFO] Pleiades detectado: TARGET_GSD conservador = 0.50m
+TARGET_GSD final determinado automáticamente: 0.50m (estrategia conservadora)
+[INFO] TARGET_GSD final determinado automáticamente: 0.50m (estrategia conservadora)
+Preparados 494 tasks para procesamiento
+[DEBUG] Preparados 494 tasks para procesamiento
+Edificios Afghanistan_Area2_Training.gpkg: 100%|██████████████████████████████████████████████████████████████████████████████████████| 494/494 [00:05<00:00, 96.34it/s]
+Resumen Afghanistan_Area2_Training.gpkg: 494 tiles procesados exitosamente
+[INFO] Resumen Afghanistan_Area2_Training.gpkg: 494 tiles procesados exitosamente
+⚠️  Tiles con problemas de cobertura:
+[WARNING] ⚠️  Tiles con problemas de cobertura:
+   - Sin escena PRE: 389
+[WARNING]    - Sin escena PRE: 389
+   - Sin escena POST: 0
+[WARNING]    - Sin escena POST: 0
+   - Sin ambas escenas: 0
+[WARNING]    - Sin ambas escenas: 0
+   - Porcentaje con problemas: 78.7%
+[WARNING]    - Porcentaje con problemas: 78.7%
+Tiles generados para D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area2_Training.gpkg: 494
+[INFO] Tiles generados para D:\AIFOREARTHQUAKE\charter-eo4ai-etq-challenge-full\Training\Annotations\Call_970_Afghanistan\Afghanistan_Area2_Training.gpkg: 494
+✅ Afghanistan_Area2_Training.gpkg: 494 tiles procesados exitosamente
+[INFO] ✅ Afghanistan_Area2_Training.gpkg: 494 tiles procesados exitosamente
+Resumen final: 1312 tiles procesados, 0 archivos fallidos
+[INFO] Resumen final: 1312 tiles procesados, 0 archivos fallidos
+Procesamiento completo! Guardados 1312 tiles
+[INFO] Procesamiento completo! Guardados 1312 tiles

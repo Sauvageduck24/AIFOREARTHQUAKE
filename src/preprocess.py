@@ -1,21 +1,33 @@
+# --- Configuración de threads para evitar conflictos en multiprocesamiento ---
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
+# --- Configuración de GDAL para optimización de I/O ---
+os.environ['GDAL_CACHEMAX'] = '1024'  # 1GB cache para GDAL
+
+import argparse
+import json
 import logging
 import math
-import os
 import re
 import shutil
 import signal
 import sys
 import warnings
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from threading import Lock
 
 import cv2
+import fiona
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
+from rasterio.enums import Resampling
 import shapely
 from pyproj import CRS, Transformer
 from rasterio.features import rasterize
@@ -25,16 +37,17 @@ from scipy.ndimage import shift as ndi_shift
 from shapely import wkb
 from shapely.geometry import box, mapping, shape
 from skimage.registration import phase_cross_correlation
-import json
 from skimage.transform import resize
 from tqdm import tqdm
-import argparse
-import fiona
+
+
 
 # Configuración global
 warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
 warnings.filterwarnings("ignore", 'GeoSeries.notna', UserWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in")
+
+
 
 # Mapeo de eventos a países - actualizado
 EVENT_TO_COUNTRY = {
@@ -66,205 +79,45 @@ ACTIVATION_DATES = {
     "Call_970_Afghanistan": datetime(2023, 10, 9, tzinfo=timezone.utc)
 }
 
-TILE_SIZE = 224
-
-BUFFER_METERS = 200  # Buffer consistente en metros
-NO_UPSAMPLE = True  # evita escalar hacia arriba
-MAX_EXTENT_OVERLAP_HRS = 48  # acepta escenas +48 h fuera del extent.temporal.end
+NO_UPSAMPLE = False  # evita escalar hacia arriba
+MAX_EXTENT_OVERLAP_HRS = 72000  # acepta escenas +720 h fuera del extent.temporal.end
 
 # === GLOBAL PERCENTILES ===
-PERCENTILE_SAMPLE_SIZE = 1000
-PERCENTILE_LOW = 2
-PERCENTILE_HIGH = 98
+PERCENTILE_SAMPLE_SIZE = 2000  # Más muestras para percentiles más precisos
+PERCENTILE_LOW = 1.0   # Percentil bajo para normalización
+PERCENTILE_HIGH = 99.0 # Percentil alto para normalización
 P = None  # Se calculará al inicio
+SCENES = None  # Se pasará a los workers
+
+# Cache para datasets de rasterio en workers
+RASTER_CACHE = {}
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger("preprocess")
 
-def _read_rgb_bands_from_separate_files(scene_path, scene_id, out_shape):
-    """Lee las bandas RGB desde archivos TIFF separados usando el JSON del satélite."""
-    try:
-        # Buscar el archivo JSON en diferentes ubicaciones posibles
-        json_path = scene_path / f"{scene_id}.json"
-        if not json_path.exists():
-            # Intentar buscar en el directorio padre si no se encuentra
-            json_path = scene_path.parent / f"{scene_id}.json"
-            if not json_path.exists():
-                return None, None
-        
-        logger.debug(f"Leyendo JSON desde: {json_path}")
-        with open(json_path, 'r') as f:
-            item_data = json.load(f)
-        
-        assets = item_data.get('assets', {})
-        logger.debug(f"Assets encontrados en JSON: {list(assets.keys())}")
-        rgb_assets = {}
-        
-        for key, asset in assets.items():
-            if key in ['red', 'green', 'blue']:
-                rgb_assets[key] = asset
-            elif 'eo:bands' in asset:
-                for band_info in asset['eo:bands']:
-                    common_name = band_info.get('common_name', '').lower()
-                    if common_name in ['red', 'green', 'blue']:
-                        rgb_assets[common_name] = asset
-                        break
-        
-        # Verificar qué bandas están disponibles
-        available_bands = {}
-        for color in ['red', 'green', 'blue']:
-            if color in rgb_assets:
-                asset = rgb_assets[color]
-                # Construir la ruta relativa desde la carpeta de la escena
-                asset_href = asset['href'].lstrip('./')
-                base_asset_path = scene_path / asset_href
-                
-                # Si la ruta no existe, intentar buscar en diferentes ubicaciones
-                if not base_asset_path.exists():
-                    possible_paths = [
-                        scene_path / "Optical_Calibration" / Path(asset_href).name,
-                        scene_path.parent / "Optical_Calibration" / Path(asset_href).name,
-                        scene_path / Path(asset_href).name,
-                    ]
-                    
-                    for possible_path in possible_paths:
-                        if possible_path.exists():
-                            base_asset_path = possible_path
-                            logger.debug(f"Archivo encontrado en ubicación alternativa: {possible_path}")
-                            break
-                
-                # Buscar archivo _aligned.tif primero
-                aligned_asset_path = base_asset_path.parent / f"{base_asset_path.stem}_aligned.tif"
-                
-                if aligned_asset_path.exists():
-                    available_bands[color] = aligned_asset_path
-                    logger.debug(f"Archivo alineado disponible para banda {color}: {aligned_asset_path.name}")
-                elif base_asset_path.exists():
-                    available_bands[color] = base_asset_path
-                    logger.debug(f"Archivo original disponible para banda {color}: {base_asset_path.name}")
-                else:
-                    logger.warning(f"No se encontró archivo para banda {color}: {base_asset_path}")
-            else:
-                logger.warning(f"No se encontró asset para banda {color}")
-        
-        # Si no tenemos al menos una banda, fallar
-        if not available_bands:
-            logger.error("No se encontraron archivos para ninguna banda RGB")
-            return None, None
-        
-        bands = []
-        transform = None
-        
-        # Intentar leer las bandas disponibles
-        for color in ['red', 'green', 'blue']:
-            if color in available_bands:
-                asset_path = available_bands[color]
-                logger.debug(f"Leyendo banda {color} desde: {asset_path}")
-                with rasterio.open(asset_path) as src:
-                    if transform is None:
-                        transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
-                    band_data = src.read(1, out_shape=out_shape)
-                    logger.debug(f"Banda {color} leída exitosamente, forma: {band_data.shape}, rango: [{band_data.min():.2f}, {band_data.max():.2f}]")
-                    bands.append(band_data)
-            else:
-                # Si falta una banda, usar la primera disponible como sustituto
-                first_available = list(available_bands.keys())[0]
-                asset_path = available_bands[first_available]
-                logger.debug(f"Usando banda {first_available} como sustituto para {color} desde: {asset_path}")
-                with rasterio.open(asset_path) as src:
-                    if transform is None:
-                        transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
-                    band_data = src.read(1, out_shape=out_shape)
-                    logger.debug(f"Banda sustituta {first_available} leída exitosamente, forma: {band_data.shape}")
-                    bands.append(band_data)
-        
-        return np.stack(bands, axis=-1), transform
-        
-    except Exception as e:
-        logger.error(f"Error leyendo bandas RGB: {e}")
-        return None, None
+# Configurar logging para que no interfiera con tqdm
+class TqdmLoggingHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # Asegurar que el mensaje termine con nueva línea para separarlo de la barra
+            if not msg.endswith('\n'):
+                msg += '\n'
+            tqdm.write(msg, end='')
+            self.flush()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            self.handleError(record)
 
-def _read_rgb_bands_from_tiff(tiff_path, out_shape):
-    """Lee las bandas RGB desde un archivo TIFF multibanda."""
-    try:
-        with rasterio.open(tiff_path) as src:
-            if src.count == 1:
-                band_data = src.read(1, out_shape=out_shape)
-                img_array = np.stack([band_data, band_data, band_data], axis=-1)
-                transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
-                return img_array, transform
-            
-            band_names = [desc.lower() if desc else '' for desc in src.descriptions]
-            rgb_indices = {'red': None, 'green': None, 'blue': None}
-            
-            for i, name in enumerate(band_names):
-                if any(color in name for color in ['red', 'r', 'b4', 'b04']):
-                    rgb_indices['red'] = i
-                elif any(color in name for color in ['green', 'g', 'b3', 'b03']):
-                    rgb_indices['green'] = i
-                elif any(color in name for color in ['blue', 'b', 'b2', 'b02']):
-                    rgb_indices['blue'] = i
-            
-            if all(idx is None for idx in rgb_indices.values()) and src.count >= 3:
-                rgb_indices = {'red': 0, 'green': 1, 'blue': 2}
-            
-            bands = []
-            for color in ['red', 'green', 'blue']:
-                band_idx = rgb_indices[color]
-                if band_idx is not None and band_idx < src.count:
-                    bands.append(src.read(band_idx + 1, out_shape=out_shape))
-                else:
-                    logger.warning(f"No se pudo encontrar banda {color} en {tiff_path}")
-                    return None, None
-            
-            img_array = np.stack(bands, axis=-1)
-            transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
-            return img_array, transform
-            
-    except Exception as e:
-        logger.error(f"Error leyendo TIFF: {e}")
-        return None, None
+# Aplicar el handler personalizado
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+logger.addHandler(TqdmLoggingHandler())
+logger.setLevel(logging.INFO)
 
-def _normalize_for_display(img_array):
-    """Normaliza un array para visualización usando percentiles."""
-    logger.debug(f"Normalizando imagen con forma: {img_array.shape}, tipo: {img_array.dtype}")
-    logger.debug(f"Rango original: [{img_array.min():.2f}, {img_array.max():.2f}]")
-    
-    if len(img_array.shape) == 2:
-        img_array = np.expand_dims(img_array, axis=-1)
-        logger.debug(f"Expandida a 3D, nueva forma: {img_array.shape}")
-    
-    # Manejar imágenes con 2 canales (crear un tercer canal)
-    if img_array.shape[2] == 2:
-        # Crear un tercer canal como promedio de los dos existentes
-        third_channel = np.mean(img_array, axis=2, keepdims=True)
-        img_array = np.concatenate([img_array, third_channel], axis=2)
-        logger.debug(f"Convertida de 2 a 3 canales, nueva forma: {img_array.shape}")
-    elif img_array.shape[2] == 1:
-        img_array = np.repeat(img_array, 3, axis=-1)
-        logger.debug(f"Repetida a 3 canales, nueva forma: {img_array.shape}")
-    elif img_array.shape[2] > 3:
-        # Si hay más de 3 canales, tomar solo los primeros 3
-        img_array = img_array[:, :, :3]
-        logger.debug(f"Reducida a 3 canales, nueva forma: {img_array.shape}")
 
-    img_norm = np.zeros_like(img_array, dtype=np.float32)
-    for i in range(img_array.shape[2]):
-        band = img_array[:, :, i]
-        if np.any(band > 0):
-            p2, p98 = np.percentile(band[band > 0], (2, 98))
-            logger.debug(f"Banda {i}: percentiles 2-98: [{p2:.2f}, {p98:.2f}]")
-            if p98 > p2:
-                img_norm[:, :, i] = np.clip((band - p2) / (p98 - p2), 0, 1)
-            else:
-                img_norm[:, :, i] = band.astype(np.float32) / (np.max(band) if np.max(band)>0 else 1)
-        else:
-            img_norm[:, :, i] = 0
-            logger.debug(f"Banda {i}: todos los valores son 0")
-    
-    logger.debug(f"Imagen normalizada, rango final: [{img_norm.min():.2f}, {img_norm.max():.2f}]")
-    return img_norm
 
 def find_fid_column(gdf):
     # Primero buscar columnas que empiecen con 'fid_'
@@ -325,12 +178,6 @@ def load_gpkg_with_fiona(gpkg_path):
         logger.info(f"Asignados {len(feature_ids)} IDs a la columna 'id'")
     
     return gdf
-
-def extract_date_from_name(name):
-    m = re.search(r"(\d{8})", name)
-    if m:
-        return datetime.strptime(m.group(1), "%Y%m%d").replace(tzinfo=timezone.utc)
-    return None
 
 def extract_earthquake_dates_from_collection(collection_path):
     """Extrae las fechas de terremotos desde el collection.json y carpetas de archivos."""
@@ -440,6 +287,7 @@ def get_activation_date(call_dir: Path) -> datetime | None:
                 pass    # formato raro → cae al fallback
 
     # 2️⃣ Busca en diccionario hard-code
+    logger.warning(f"Error buscando las fechas, se usan las fechas de activación de los terremotos por defecto: {ACTIVATION_DATES.get(call_dir.name)}")
     dt = ACTIVATION_DATES.get(call_dir.name)
     if dt:
         return dt
@@ -452,30 +300,167 @@ def read_gsd(item_json):
     """Lee el Ground Sample Distance (GSD) del item JSON o lo estima del primer band."""
     with open(item_json) as f:
         item = json.load(f)
-    gsd = item['properties'].get('gsd')
     
-    if gsd is None:
-        # Estimate from the first band
-        calib_dir = item_json.parent / "Optical_Calibration"
-        band_files = list(calib_dir.glob('r-*.tif'))
-        if band_files:
+    # Detectar sensor para usar GSD por defecto apropiado
+    sensor = item.get('properties', {}).get('platform', 'unknown').lower()
+    
+    # GSDs por defecto basados en especificaciones técnicas de cada sensor
+    sensor_default_gsd = {
+        'worldview-2': 2.0,  # MS: ~2.0m
+        'worldview-3': 1.24, # MS: ~1.24m
+        'pleiades': 2.0,     # MS: ~2.0m
+        'pleiades-1a': 2.0,
+        'pleiades-1b': 2.0,
+        'kompsat-3a': 2.2,   # MS: ~2.2m
+        'gaofen-2': 4.0,     # MS: ~4.0m
+        'geoeye-1': 2.0,     # MS: ~2.0m
+        'unknown': 2.0       # Fallback conservador
+    }
+    
+    gsd = None
+    
+    # PRIMERA OPCIÓN: Leer GSD directamente del TIFF (más confiable)
+    calib_dir = item_json.parent / "Optical_Calibration"
+    band_files = list(calib_dir.glob('r-*.tif'))
+    if band_files:
+        try:
             with rasterio.open(band_files[0]) as src:
-                gsd = abs(src.transform.a)
-    else:
-        # Validar que el GSD del JSON sea razonable
-        if gsd < 0.1 or gsd > 100:  # GSD fuera del rango razonable para imágenes satelitales
-            # Estimar desde el primer band como fallback
-            calib_dir = item_json.parent / "Optical_Calibration"
-            band_files = list(calib_dir.glob('r-*.tif'))
-            if band_files:
-                with rasterio.open(band_files[0]) as src:
-                    gsd_from_raster = abs(src.transform.a)
-                    if 0.1 <= gsd_from_raster <= 100:  # Si el GSD del raster es razonable
-                        gsd = gsd_from_raster
+                pixel_size = abs(src.transform.a)
+                
+                # Convertir unidades según el CRS
+                if src.crs:
+                    crs_obj = CRS.from_string(str(src.crs))
+                    
+                    # Si está en coordenadas geográficas (grados), convertir a metros
+                    if crs_obj.is_geographic:
+                        # Aproximación: 1 grado ≈ 111320 metros en el ecuador
+                        # Más preciso sería usar la latitud, pero esta es una buena aproximación
+                        gsd_from_tiff = pixel_size * 111320
+                        logger.debug(f"CRS geográfico detectado, convirtiendo {pixel_size}° a {gsd_from_tiff:.2f}m")
                     else:
-                        gsd = None  # Se manejará en process_scene
+                        # Ya está en unidades proyectadas (probablemente metros)
+                        gsd_from_tiff = pixel_size
+                        logger.debug(f"CRS proyectado detectado, GSD: {gsd_from_tiff}m")
+                else:
+                    # Sin CRS, asumir que ya está en metros
+                    gsd_from_tiff = pixel_size
+                    logger.warning(f"Sin CRS detectado, asumiendo GSD en metros: {gsd_from_tiff}")
+                
+                if 0.1 <= gsd_from_tiff <= 100:  # Validar que sea razonable
+                    gsd = gsd_from_tiff
+                    logger.debug(f"GSD leído del TIFF: {gsd:.2f}m para sensor {sensor}")
+                else:
+                    logger.warning(f"GSD del TIFF inválido ({gsd_from_tiff:.6f}) para sensor {sensor}")
+        except Exception as e:
+            logger.warning(f"Error leyendo GSD del TIFF: {e}")
+    
+    # SEGUNDA OPCIÓN: Usar GSD del JSON solo si el TIFF no funcionó
+    if gsd is None:
+        gsd_json = item['properties'].get('gsd')
+        if gsd_json is not None:
+            if 0.1 <= gsd_json <= 100:  # Validar que sea razonable
+                gsd = gsd_json
+                logger.debug(f"GSD leído del JSON: {gsd}m para sensor {sensor}")
+            else:
+                logger.warning(f"GSD del JSON inválido ({gsd_json}) para sensor {sensor}")
+    
+    # TERCERA OPCIÓN: Usar GSD por defecto del sensor
+    if gsd is None or not np.isfinite(gsd) or gsd <= 0:
+        gsd = sensor_default_gsd.get(sensor, 2.0)
+        logger.warning(f"Usando GSD por defecto para sensor {sensor}: {gsd}m")
     
     return gsd
+
+def determine_optimal_target_gsd(scenes):
+    """
+    Determina automáticamente el TARGET_GSD óptimo basándose en las características de las escenas.
+    
+    Estrategia:
+    1. Analizar el GSD de todas las escenas disponibles
+    2. Usar el GSD mínimo para preservar máxima resolución
+    3. Considerar el tipo de sensor y sus capacidades
+    4. Balancear calidad vs rendimiento
+    
+    Args:
+        scenes: Lista de escenas con información de GSD y sensor
+    
+    Returns:
+        TARGET_GSD óptimo en metros
+    """
+    if not scenes:
+        logger.warning("No hay escenas disponibles, usando TARGET_GSD por defecto: 0.5m")
+        return 0.5
+    
+    # Extraer GSDs de todas las escenas
+    gsds = []
+    sensors = []
+    
+    for scene in scenes:
+        if scene.get('gsd') and np.isfinite(scene['gsd']) and scene['gsd'] > 0:
+            gsds.append(scene['gsd'])
+            # Extraer información del sensor
+            scene_id = scene.get('scene_id', '').lower()
+            if any(sat in scene_id for sat in ['wv', 'worldview']):
+                sensors.append('worldview')
+            elif any(sat in scene_id for sat in ['pleiades', 'ds_phr']):
+                sensors.append('pleiades')
+            elif any(sat in scene_id for sat in ['kompsat', 'k3']):
+                sensors.append('kompsat')
+            elif any(sat in scene_id for sat in ['gaofen', 'gf']):
+                sensors.append('gaofen')
+            elif any(sat in scene_id for sat in ['geoeye', 'ge']):
+                sensors.append('geoeye')
+            else:
+                sensors.append('unknown')
+    
+    if not gsds:
+        logger.warning("No se pudieron extraer GSDs válidos, usando TARGET_GSD por defecto: 0.5m")
+        return 0.5
+    
+    # Estadísticas de GSD
+    min_gsd = min(gsds)
+    max_gsd = max(gsds)
+    median_gsd = np.median(gsds)
+    mean_gsd = np.mean(gsds)
+    
+    logger.info(f"Análisis de GSD de {len(gsds)} escenas:")
+    logger.info(f"  Mínimo: {min_gsd:.2f}m, Máximo: {max_gsd:.2f}m")
+    logger.info(f"  Mediana: {median_gsd:.2f}m, Media: {mean_gsd:.2f}m")
+    
+    # === NUEVA ESTRATEGIA: TARGET_GSD CONSERVADOR PARA EVITAR UPSAMPLE EXCESIVO ===
+    # Usar un TARGET_GSD conservador para evitar upsample excesivo
+    if sensors:
+        sensor_counts = Counter(sensors)
+        most_common_sensor = sensor_counts.most_common(1)[0][0]
+        logger.info(f"Sensor predominante: {most_common_sensor}")
+        
+        # TARGET_GSD conservador por sensor para evitar upsample excesivo
+        if most_common_sensor == 'worldview':
+            target_gsd = max(min_gsd, 1.0)  # Mínimo 1.0m para WorldView
+            logger.info(f"WorldView detectado: TARGET_GSD conservador = {target_gsd:.2f}m")
+        elif most_common_sensor == 'pleiades':
+            target_gsd = max(min_gsd, 0.5)  # Mínimo 0.5m para Pleiades
+            logger.info(f"Pleiades detectado: TARGET_GSD conservador = {target_gsd:.2f}m")
+        elif most_common_sensor == 'kompsat':
+            target_gsd = max(min_gsd, 1.0)  # Mínimo 1.0m para Kompsat
+            logger.info(f"Kompsat detectado: TARGET_GSD conservador = {target_gsd:.2f}m")
+        else:
+            target_gsd = max(min_gsd, 1.0)  # Mínimo 1.0m para otros sensores
+            logger.info(f"Otro sensor detectado: TARGET_GSD conservador = {target_gsd:.2f}m")
+    else:
+        target_gsd = max(min_gsd, 1.0)  # Mínimo 1.0m por defecto
+        logger.info(f"Sin sensor predominante: TARGET_GSD conservador = {target_gsd:.2f}m")
+    
+    # Límite superior para evitar tiles demasiado grandes
+    if target_gsd < 0.3:
+        target_gsd = 0.3
+        logger.info(f"Limitando TARGET_GSD a 0.3m para evitar tiles excesivamente grandes")
+    elif target_gsd > 4.0:
+        target_gsd = 4.0
+        logger.info(f"Limitando TARGET_GSD a 4.0m para evitar tiles demasiado pequeños")
+    
+    logger.info(f"TARGET_GSD final determinado automáticamente: {target_gsd:.2f}m (estrategia conservadora)")
+    return target_gsd
 
 def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_end=None, satellites=None):
     """Encuentra escenas usando collection.json y metadatos actualizados."""
@@ -483,11 +468,11 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
     
     # Procesar lista de satélites
     if satellites is None:
-        satellites = ['wv', 'ds']
+        satellites = ['all']
     elif isinstance(satellites, str):
         satellites = [s.strip().lower() for s in satellites.split(',')]
     
-    logger.info(f"Filtrando escenas por satélites: {satellites}")
+    # logger.info(f"Filtrando escenas por satélites: {satellites}")
     
     # Buscar collection.json en diferentes ubicaciones
     collection_path = None
@@ -504,7 +489,7 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
     for path in possible_collection_paths:
         if path.exists():
             collection_path = path
-            logger.info(f"Encontrado collection.json en: {collection_path}")
+            # logger.info(f"Encontrado collection.json en: {collection_path}")
             break
     
     if not collection_path:
@@ -519,13 +504,14 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
 
     all_item_data = []
     item_links = [link['href'] for link in collection_data.get('links', []) if link.get('rel') == 'item']
-    logger.info(f"Encontrados {len(item_links)} items en collection.json")
+    # logger.info(f"Encontrados {len(item_links)} items en collection.json")
     
     # Si no hay items en collection.json, buscar archivos JSON directamente
     if not item_links:
-        logger.info("No se encontraron items en collection.json, buscando archivos JSON directamente...")
+        # logger.info("No se encontraron items en collection.json, buscando archivos JSON directamente...")
         for event_dir in training_root.glob("Call_*"):
             if event_dir.is_dir():
+                # Buscar archivos JSON directamente en las carpetas *-calibrated
                 for json_file in event_dir.glob("*-calibrated/*.json"):
                     if json_file.name != "collection.json":
                         try:
@@ -535,7 +521,7 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
                                 all_item_data.append(item_data)
                         except Exception as e:
                             logger.warning(f"Error leyendo {json_file}: {e}")
-        logger.info(f"Encontrados {len(all_item_data)} archivos JSON directamente")
+        # logger.info(f"Encontrados {len(all_item_data)} archivos JSON directamente")
     
     for item_href in item_links:
         item_path = (collection_path.parent / item_href).resolve()
@@ -550,46 +536,64 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
         else:
             logger.warning(f"Item no encontrado: {item_path}")
 
-    # Agrupar escenas MS y PN del mismo satélite
+    # Agrupar escenas MS y PN del mismo satélite por fecha y coordenadas aproximadas
     grouped_scenes = {}
-    logger.info(f"Agrupando {len(all_item_data)} items...")
+    logger.debug(f"Agrupando {len(all_item_data)} items...")
     
     for item in all_item_data:
         scene_id = item.get('id', '')
-        base_name = scene_id
         
-        # Mejor lógica de agrupamiento
-        if 'WV03N28_549166E087' in scene_id:
-            base_name = 'WV03N28_549166E087'
-        else:
-            if re.search(r"MS\d{2}", scene_id):
-                base_name = scene_id.split('_MS')[0]
-            elif re.search(r"PN\d{2}", scene_id):
-                base_name = scene_id.split('_PN')[0]
+        # Extraer información clave para agrupamiento inteligente
+        def extract_grouping_key(scene_id):
+            # Para WorldView: extraer satélite + coordenadas aproximadas + fecha
+            if re.match(r'WV\d{2}', scene_id):
+                # Ejemplo: WV02N34_324027E062_3175002023101800000000MS00
+                match = re.match(r'(WV\d{2})(N\d{2})_(\d{6})(E\d{3})_(\d{6})(\d{14})', scene_id)
+                if match:
+                    satellite, lat_deg, lat_min, lon_deg, lon_min, datetime_part = match.groups()
+                    # Redondear coordenadas a un rango más amplio para agrupar escenas cercanas
+                    lat_min_rounded = str(int(lat_min[:4]) // 10 * 10).zfill(4)  # Redondear a decenas
+                    lon_min_rounded = str(int(lon_min[:4]) // 10 * 10).zfill(4)  # Redondear a decenas
+                    date_part = datetime_part[:8]  # Solo fecha YYYYMMDD
+                    return f"{satellite}{lat_deg}_{lat_min_rounded}{lon_deg}_{lon_min_rounded}_{date_part}"
+            
+            # Para otros satélites, usar nombre completo sin MS/PN
+            base_name = scene_id
             if base_name.endswith('-calibrated'):
                 base_name = base_name[:-11]
+            base_name = re.sub(r'(MS|PN)\d{2}$', '', base_name)
+            return base_name
         
-        if base_name not in grouped_scenes:
-            grouped_scenes[base_name] = {}
+        grouping_key = extract_grouping_key(scene_id)
+        
+        if grouping_key not in grouped_scenes:
+            grouped_scenes[grouping_key] = {}
         
         if re.search(r"MS\d{2}", scene_id):
-            grouped_scenes[base_name]['MS'] = item
+            grouped_scenes[grouping_key]['MS'] = item
+            logger.debug(f"Agregada escena MS: {scene_id} -> {grouping_key}")
         elif re.search(r"PN\d{2}", scene_id):
-            grouped_scenes[base_name]['PN'] = item
+            grouped_scenes[grouping_key]['PN'] = item
+            logger.debug(f"Agregada escena PN: {scene_id} -> {grouping_key}")
         else:
-            grouped_scenes[base_name]['OTRO'] = item
+            grouped_scenes[grouping_key]['OTRO'] = item
+            logger.debug(f"Agregada escena OTRO: {scene_id} -> {grouping_key}")
 
     # Procesar escenas agrupadas
     final_items_to_process = []
-    for base_name, items in grouped_scenes.items():
-        is_worldview = 'wv' in base_name.lower() or 'worldview' in base_name.lower()
+    logger.debug(f"Procesando {len(grouped_scenes)} grupos de escenas...")
+    for grouping_key, items in grouped_scenes.items():
+        is_worldview = 'wv' in grouping_key.lower() or 'worldview' in grouping_key.lower()
+        logger.debug(f"Grupo {grouping_key}: WorldView={is_worldview}, items={list(items.keys())}")
         if is_worldview:
             if 'MS' in items:
                 final_items_to_process.append(items['MS'])
+                logger.debug(f"Agregada escena WorldView MS: {grouping_key}")
             else:
-                logger.warning(f"No se encontró escena MS para WorldView {base_name}")
+                logger.warning(f"No se encontró escena MS para WorldView {grouping_key}")
         else:
             final_items_to_process.extend(items.values())
+            logger.debug(f"Agregadas todas las escenas no-WorldView: {grouping_key}")
 
     scenes = []
     for item_data in final_items_to_process:
@@ -608,11 +612,20 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
             
             # Mapeo de abreviaciones de satélites a patrones de búsqueda
             satellite_patterns = {
-                'wv': ['wv', 'worldview', 'world view'],
-                'ds': ['ds_phr', 'ds-phr', 'pleiades', 'pleiade'],
-                'pleiades': ['pleiades', 'pleiade', 'ds_phr', 'ds-phr'],
-                'geoeye': ['geoeye', 'geo eye', 'ge'],
-                'ge': ['geoeye', 'geo eye', 'ge']
+                'wv': ['wv', 'worldview', 'world view', 'wv02', 'wv03'],
+                'ds': ['ds_phr', 'ds-phr', 'pleiades', 'pleiade', 'ds_phr1a', 'ds_phr1b'],
+                'pleiades': ['pleiades', 'pleiade', 'ds_phr', 'ds-phr', 'ds_phr1a', 'ds_phr1b'],
+                'bsg': ['bsg', 'beijing space view', 'bsg-116'],
+                'k3a': ['k3a', 'kompsat', 'kompsat-3a', 'kompsat3a'],
+                'gf2': ['gf2', 'gaofen', 'gaofen-2', 'gaofen2', 'gf2_pms2', 'gf2-pms2'],
+                'geoeye': ['geoeye', 'geo eye', 'ge', 'geoeye-1', 'geoeye1'],
+                'ge': ['geoeye', 'geo eye', 'ge', 'geoeye-1', 'geoeye1'],
+                'all': ['wv', 'worldview', 'world view', 'wv02', 'wv03',
+                        'ds_phr', 'ds-phr', 'pleiades', 'pleiade', 'ds_phr1a', 'ds_phr1b',
+                        'bsg', 'beijing space view', 'bsg-116',
+                        'k3a', 'kompsat', 'kompsat-3a', 'kompsat3a',
+                        'gf2', 'gaofen', 'gaofen-2', 'gaofen2', 'gf2_pms2', 'gf2-pms2',
+                        'geoeye', 'geo eye', 'ge', 'geoeye-1', 'geoeye1']
             }
             
             # Verificar si la escena corresponde a alguno de los satélites solicitados
@@ -712,7 +725,16 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
                 with rasterio.open(overview_path) as src:
                     scene_crs = str(src.crs) if src.crs else None
                     if src.transform:
-                        scene_gsd = abs(src.transform[0])
+                        pixel_size_overview = abs(src.transform[0])
+                        # Convertir unidades según el CRS (mismo que en read_gsd)
+                        if src.crs:
+                            crs_obj = CRS.from_string(str(src.crs))
+                            if crs_obj.is_geographic:
+                                scene_gsd = pixel_size_overview * 111320  # grados a metros
+                            else:
+                                scene_gsd = pixel_size_overview  # ya en metros
+                        else:
+                            scene_gsd = pixel_size_overview
                     
                     bounds = src.bounds
                     scene_geom = box(bounds.left, bounds.bottom, bounds.right, bounds.top)
@@ -741,38 +763,32 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
                 continue
                 
             bands = {}
-            for band_file in calib_dir.glob("r-*.tif"):
+            band_files_found = list(calib_dir.glob("r-*.tif"))
+            for band_file in band_files_found:
                 band_name = band_file.stem.split('-')[-1]
                 
                 # Buscar versión _aligned primero
                 aligned_band_file = band_file.parent / f"{band_file.stem}_aligned.tif"
                 if aligned_band_file.exists():
                     bands[band_name] = aligned_band_file
-                    logger.debug(f"Usando banda alineada: {aligned_band_file.name}")
                 else:
                     bands[band_name] = band_file
 
-            # Añadir pan si existe
-            pan_file = calib_dir / "r-pan.tif"
-            aligned_pan_file = calib_dir / "r-pan_aligned.tif"
-            if aligned_pan_file.exists():
-                bands['pan'] = aligned_pan_file
-            elif pan_file.exists():
-                bands['pan'] = pan_file
 
-            # Filter by temporal interval
-            if interval_start and interval_end and scene_date:
-                if scene_date < interval_start:
-                    continue
-                
-                if scene_date > interval_end + timedelta(hours=MAX_EXTENT_OVERLAP_HRS):
-                    logger.warning(f"{scene_id} fuera de intervalo "
-                                 f"({scene_date} > {interval_end})  — descartado")
-                    continue
-                elif scene_date > interval_end:
-                    hours_over = (scene_date - interval_end).total_seconds() / 3600
-                    logger.info(f"{scene_id} {scene_date} a {hours_over:.1f} h "
-                               f"del límite; lo acepto por margen +{MAX_EXTENT_OVERLAP_HRS} h")
+
+            # -- Desactivar filtro de intervalo --
+            # if interval_start and interval_end and scene_date:
+            #     if scene_date < interval_start:
+            #         continue
+            #     
+            #     if scene_date > interval_end + timedelta(hours=MAX_EXTENT_OVERLAP_HRS):
+            #         logger.warning(f"{scene_id} fuera de intervalo "
+            #                      f"({scene_date} > {interval_end})  — descartado")
+            #         continue
+            #     elif scene_date > interval_end:
+            #         hours_over = (scene_date - interval_end).total_seconds() / 3600
+            #         logger.info(f"{scene_id} {scene_date} a {hours_over:.1f} h "
+            #                    f"del límite; lo acepto por margen +{MAX_EXTENT_OVERLAP_HRS} h")
 
             scene_info = {
                 'scene_id': scene_id,
@@ -787,13 +803,13 @@ def find_scenes_for_aoi(aoi_geom, training_root, interval_start=None, interval_e
             }
             
             scenes.append(scene_info)
-            logger.info(f"Escena añadida: {scene_id} con {len(bands)} bandas")
+            # logger.info(f"Escena añadida: {scene_id} con {len(bands)} bandas (GSD: {scene_gsd:.2f}m)")
             
         except Exception as e:
             logger.warning(f"Error procesando escena {item_data.get('id', 'unknown')}: {e}")
             continue
     
-    logger.info(f"Total de escenas procesadas: {len(scenes)}")
+    # logger.info(f"Total de escenas procesadas: {len(scenes)}")
     return scenes
 
 def select_best_scenes(scenes, activation_date):
@@ -835,28 +851,30 @@ def select_best_scenes(scenes, activation_date):
     
     # Log de selección para debugging
     if pre_scene:
-        logger.info(f"Mejor escena PRE seleccionada: {pre_scene['scene_id']} "
-                   f"(fecha: {pre_scene['date']}, nubes: {pre_scene.get('cloud_cover', 'N/A')}%, "
-                   f"off-nadir: {pre_scene.get('sat:off_nadir', 'N/A')}°)")
+        # logger.info(f"Mejor escena PRE seleccionada: {pre_scene['scene_id']} "
+        #            f"(fecha: {pre_scene['date']}, nubes: {pre_scene.get('cloud_cover', 'N/A')}%, "
+        #            f"off-nadir: {pre_scene.get('sat:off_nadir', 'N/A')}°)")
+        pass
     if post_scene:
-        logger.info(f"Mejor escena POST seleccionada: {post_scene['scene_id']} "
-                   f"(fecha: {post_scene['date']}, nubes: {post_scene.get('cloud_cover', 'N/A')}%, "
-                   f"off-nadir: {post_scene.get('sat:off_nadir', 'N/A')}°)")
+        # logger.info(f"Mejor escena POST seleccionada: {post_scene['scene_id']} "
+        #            f"(fecha: {post_scene['date']}, nubes: {post_scene.get('cloud_cover', 'N/A')}%, "
+        #            f"off-nadir: {post_scene.get('sat:off_nadir', 'N/A')}°)")
+        pass
     
     if not pre_scene and not post_scene:
         return None, None
     return pre_scene, post_scene
 
-def buffer_geom(building, crs):
+def buffer_geom(building, crs, buffer_meters):
     # Buffer consistente en metros
     if crs.to_epsg() != 3857:
         building_3857 = shapely.ops.transform(
             Transformer.from_crs(crs, 3857, always_xy=True).transform, building)
-        buffered = building_3857.buffer(BUFFER_METERS, cap_style=1)
+        buffered = building_3857.buffer(buffer_meters, cap_style=1)
         buffered = shapely.ops.transform(
             Transformer.from_crs(3857, crs, always_xy=True).transform, buffered)
     else:
-        buffered = building.buffer(BUFFER_METERS, cap_style=1)
+        buffered = building.buffer(buffer_meters, cap_style=1)
     return buffered
 
 
@@ -874,11 +892,11 @@ def rasterize_mask(poly, window, transform, out_shape):
     return mask
 
 
-TARGET_GSD = 0.5  # metros por pixel objetivo
+TARGET_GSD = None  # Se determinará automáticamente basándose en las escenas
 
 
-def sample_patches_for_percentiles(training_root, sample_size=1000):
-    """Extrae parches aleatorios de todas las bandas y sensores para calcular percentiles globales."""
+def sample_patches_for_percentiles_per_sensor(training_root, sample_size=1000):
+    """Extrae parches aleatorios y calcula percentiles por banda y por sensor."""
     from random import shuffle
     sample_values = {}
     scenes = []
@@ -888,6 +906,7 @@ def sample_patches_for_percentiles(training_root, sample_size=1000):
             try:
                 with open(item_json, 'r') as f:
                     item = json.load(f)
+                sensor = item.get('properties', {}).get('platform', 'unknown').lower()
                 calib_dir = item_json.parent / "Optical_Calibration"
                 if not calib_dir.exists():
                     continue
@@ -896,41 +915,68 @@ def sample_patches_for_percentiles(training_root, sample_size=1000):
                     band_name = band_file.stem.split('-')[-1]
                     bands[band_name] = band_file
                 if bands:
-                    scenes.append((bands, calib_dir))
+                    scenes.append((sensor, bands, calib_dir))
             except Exception:
                 continue
     shuffle(scenes)
-    count = 0
-    for bands, calib_dir in scenes:
+    count = {}
+    for sensor, bands, calib_dir in scenes:
         for band_name, band_path in bands.items():
             try:
                 with rasterio.open(band_path) as src:
-                    # Extraer un parche aleatorio
                     h, w = src.height, src.width
                     if h < 64 or w < 64:
                         continue
                     y = np.random.randint(0, h-64)
                     x = np.random.randint(0, w-64)
                     patch = src.read(1, window=rasterio.windows.Window(x, y, 64, 64))
-                    if band_name not in sample_values:
-                        sample_values[band_name] = []
-                    sample_values[band_name].append(patch.flatten())
-                    count += 1
-                    if count >= sample_size:
+                    key = (sensor, band_name)
+                    if key not in sample_values:
+                        sample_values[key] = []
+                        count[key] = 0
+                    sample_values[key].append(patch.flatten())
+                    count[key] += 1
+                    if count[key] >= sample_size:
                         break
             except Exception:
                 continue
-        if count >= sample_size:
-            break
-    # Concatenar y calcular percentiles
     percentiles = {}
-    for band in sample_values:
-        vals = np.concatenate(sample_values[band])
-        percentiles[band] = np.percentile(vals, [PERCENTILE_LOW, PERCENTILE_HIGH])
+    for (sensor, band), vals_list in sample_values.items():
+        vals = np.concatenate(vals_list)
+        percentiles[(sensor, band)] = np.percentile(vals, [PERCENTILE_LOW, PERCENTILE_HIGH])
     return percentiles
 
+def enhance_image_quality(img_array):
+    """Mejora la calidad visual de la imagen aplicando ajustes automáticos de contraste y brillo."""
+    if img_array is None:
+        return None
+    
+    # Convertir a float32 si no lo está
+    img = img_array.astype(np.float32)
+    
+    # Aplicar histogram stretching por canal
+    enhanced = np.zeros_like(img)
+    for i in range(img.shape[-1]):
+        channel = img[..., i]
+        
+        # Calcular percentiles para stretching
+        p1, p99 = np.percentile(channel, [1, 99])
+        
+        # Aplicar stretching
+        if p99 > p1:
+            channel_stretched = np.clip((channel - p1) / (p99 - p1), 0, 1)
+        else:
+            channel_stretched = channel
+        
+        # Ajuste de gamma sutil para mejorar contraste
+        gamma = 0.85  # Más contraste
+        channel_gamma = np.power(channel_stretched, gamma)
+        
+        enhanced[..., i] = channel_gamma
+    
+    return enhanced
 
-def process_scene(scene, bbox, target_crs, is_pre, geom):
+def process_scene(scene, bbox, target_crs, is_pre, geom, tile_size):
     global P
     if scene is None:
         logger.warning(f"process_scene: scene es None para {'PRE' if is_pre else 'POST'}")
@@ -939,264 +985,473 @@ def process_scene(scene, bbox, target_crs, is_pre, geom):
         logger.warning(f"process_scene: scene sin bandas para {'PRE' if is_pre else 'POST'} - scene_id: {scene.get('scene_id', 'Unknown')}")
         return None
     
-    gsd = scene.get("gsd", TARGET_GSD)
+    gsd = scene.get("gsd", 2.0)  # Valor por defecto si no hay GSD
     
-    # Robustez: gsd y TARGET_GSD deben ser finitos y positivos
+    # Robustez: gsd debe ser finito y positivo
     try:
         gsd = float(gsd)
     except Exception:
-        #print(f"❌ GSD no convertible a float: {gsd} en escena {scene['scene_id']}. Usando {TARGET_GSD}")
-        gsd = TARGET_GSD
+        logger.warning(f"GSD no convertible a float: {gsd} en escena {scene['scene_id']}. Usando 2.0")
+        gsd = 2.0
     
     if not np.isfinite(gsd) or gsd <= 0:
-        #print(f"❌ GSD inválido ({gsd}) para escena {scene['scene_id']}, usando valor por defecto {TARGET_GSD}")
-        gsd = TARGET_GSD
+        logger.warning(f"GSD inválido ({gsd}) para escena {scene['scene_id']}, usando valor por defecto 2.0")
+        gsd = 2.0
     
     # Detectar GSD extremadamente pequeño o grande que causa problemas
     if gsd < 0.1:
-        logger.warning(f"GSD demasiado pequeño: {gsd} para escena {scene['scene_id']}, usando TARGET_GSD = {TARGET_GSD}")
-        gsd = TARGET_GSD
+        logger.warning(f"GSD demasiado pequeño: {gsd} para escena {scene['scene_id']}, usando 2.0")
+        gsd = 2.0
     elif gsd > 100:
-        logger.warning(f"GSD demasiado grande: {gsd} para escena {scene['scene_id']}, usando TARGET_GSD = {TARGET_GSD}")
-        gsd = TARGET_GSD
+        logger.warning(f"GSD demasiado grande: {gsd} para escena {scene['scene_id']}, usando 2.0")
+        gsd = 2.0
     
-    tgt_gsd = TARGET_GSD
-    try:
-        tgt_gsd = float(tgt_gsd)
-    except Exception:
-        logger.warning(f"TARGET_GSD no convertible a float: {tgt_gsd}. Usando 1.0")
-        tgt_gsd = 1.0
-    if not np.isfinite(tgt_gsd) or tgt_gsd <= 0:
-        logger.warning(f"TARGET_GSD inválido ({tgt_gsd}), usando 1.0")
-        tgt_gsd = 1.0
-    scale = gsd / tgt_gsd
-    if not np.isfinite(scale) or scale <= 0:
-        logger.warning(f"Scale inválido ({scale}) para escena {scene['scene_id']} (gsd={gsd}, target_gsd={tgt_gsd}), usando 1.0")
-        scale = 1.0
-    if NO_UPSAMPLE and scale > 1.0:
-        scale = 1.0  # no ampliamos escenas de baja resolución
+    # Usar TARGET_GSD global si está disponible, sino usar un valor por defecto
+    if TARGET_GSD is not None and np.isfinite(TARGET_GSD) and TARGET_GSD > 0:
+        tgt_gsd = TARGET_GSD
+    else:
+        tgt_gsd = 2.0  # Valor por defecto si TARGET_GSD no está determinado
+        logger.warning("TARGET_GSD no está determinado, usando valor por defecto 2.0m")
+    
+    # Mantener scale_orig, usar un flag no_upsample
+    scale_orig = gsd / tgt_gsd
+    if not np.isfinite(scale_orig) or scale_orig <= 0:
+        logger.warning(f"Scale inválido ({scale_orig}) para escena {scene['scene_id']} (gsd={gsd}, target_gsd={tgt_gsd}), usando 1.0")
+        scale_orig = 1.0
     
     # Validación adicional para scale muy pequeño que podría causar dimensiones 0
-    if scale < 0.001:  # Si el scale es menor a 0.001, es prácticamente 0
-        logger.warning(f"Scale extremadamente pequeño detectado: {scale:.10f} para escena {scene['scene_id']}, forzando scale = 1.0")
-        scale = 1.0
+    if scale_orig < 0.001:  # Si el scale es menor a 0.001, es prácticamente 0
+        logger.warning(f"Scale extremadamente pequeño detectado: {scale_orig:.10f} para escena {scene['scene_id']}, forzando scale = 1.0")
+        scale_orig = 1.0
+    
+    # Determinar si no hacer upsample (preservar resolución nativa)
+    # Para WorldView, ser más permisivo con el upsample para evitar imágenes muy pequeñas
+    scene_id = scene.get('scene_id', '').lower()
+    
+    if 'worldview' in scene_id or 'wv' in scene_id:
+        # WorldView: permitir upsample hasta 2x para evitar imágenes muy pequeñas
+        no_upsample = NO_UPSAMPLE and scale_orig > 2.0
+    else:
+        # Otros sensores: comportamiento original
+        no_upsample = NO_UPSAMPLE and scale_orig > 1.0
+    
+    scale = scale_orig  # ¡no tocar el scale original!
     
     band_arrays = []
-    band_names = list(scene["bands"].keys())
     mask = None
+    loaded_band_files = []  # Para mostrar los nombres de los archivos cargados
     
-    for band_name, band_path in scene["bands"].items():
+    # Cargar solo bandas RGB necesarias
+    desired_order = ["red", "green", "blue"]
+    bands_to_load = []
+    
+    # Buscar bandas RGB disponibles (priorizando versiones _aligned)
+    for band in desired_order:
+        # Primero buscar versión aligned, luego normal
+        aligned_band = f"{band}_aligned"
+        if aligned_band in scene["bands"]:
+            bands_to_load.append(aligned_band)
+        elif band in scene["bands"]:
+            bands_to_load.append(band)
+        else:
+            # Si falta una banda, buscar sustitutos (también priorizando _aligned)
+            if band == 'blue':
+                if 'coastal_aligned' in scene["bands"]:
+                    bands_to_load.append('coastal_aligned')
+                elif 'coastal' in scene["bands"]:
+                    bands_to_load.append('coastal')
+                elif 'green_aligned' in scene["bands"]:
+                    bands_to_load.append('green_aligned')
+                elif 'green' in scene["bands"]:
+                    bands_to_load.append('green')
+                elif 'red_aligned' in scene["bands"]:
+                    bands_to_load.append('red_aligned')
+                elif 'red' in scene["bands"]:
+                    bands_to_load.append('red')
+                else:
+                    # Usar la primera banda disponible
+                    bands_to_load.append(list(scene["bands"].keys())[0])
+            elif band == 'green':
+                if 'red_aligned' in scene["bands"]:
+                    bands_to_load.append('red_aligned')
+                elif 'red' in scene["bands"]:
+                    bands_to_load.append('red')
+                else:
+                    bands_to_load.append(list(scene["bands"].keys())[0])
+            elif band == 'red':
+                if 'green_aligned' in scene["bands"]:
+                    bands_to_load.append('green_aligned')
+                elif 'green' in scene["bands"]:
+                    bands_to_load.append('green')
+                else:
+                    bands_to_load.append(list(scene["bands"].keys())[0])
+            else:
+                # Usar la primera banda disponible
+                bands_to_load.append(list(scene["bands"].keys())[0])
+    
+    # Asegurar que tenemos al menos 3 bandas
+    while len(bands_to_load) < 3:
+        if list(scene["bands"].keys())[0] not in bands_to_load:
+            bands_to_load.append(list(scene["bands"].keys())[0])
+        else:
+            # Si ya está la primera, usar la segunda
+            bands_to_load.append(list(scene["bands"].keys())[1] if len(scene["bands"]) > 1 else list(scene["bands"].keys())[0])
+    
+    # Crear máscara una sola vez usando la primera banda
+    first_band_path = scene["bands"][bands_to_load[0]]
+    try:
+        src = get_cached_dataset(first_band_path)
+        if src.crs != target_crs:
+            tf = Transformer.from_crs(
+                target_crs, src.crs, always_xy=True
+            ).transform
+            minx, miny = tf(bbox[0], bbox[1])
+            maxx, maxy = tf(bbox[2], bbox[3])
+            bbox_t = (minx, miny, maxx, maxy)
+        else:
+            bbox_t = bbox
+        
+        win = from_bounds(*bbox_t, transform=src.transform)
+        
+        if win.width == 0 or win.height == 0:
+            logger.warning(f"Ventana vacía para escena {scene['scene_id']}, banda {bands_to_load[0]}: {win}")
+            return None
+        
+        # Crear máscara una sola vez
+        if src.crs != target_crs:
+            geom_ds = shapely.ops.transform(
+                Transformer.from_crs(
+                    target_crs, src.crs, always_xy=True
+                ).transform,
+                geom,
+            )
+        else:
+            geom_ds = geom
+
+        # Crear máscara en resolución nativa
+        mask_full = rasterize_mask(
+            poly=geom_ds,  # shapely Polygon del edificio
+            window=win,
+            transform=src.window_transform(win),
+            out_shape=(int(win.height), int(win.width)),
+        )
+
+        # Validar que mask_full no esté vacía
+        if mask_full.size == 0 or mask_full.shape[0] == 0 or mask_full.shape[1] == 0:
+            logger.warning(f"Máscara vacía para escena {scene['scene_id']}")
+            return None
+
+        # Re-muestrear la máscara directamente al tamaño objetivo
+        if no_upsample:
+            # Sin remuestreo, solo redimensionar si es necesario
+            if mask_full.shape != (tile_size, tile_size):
+                mask = cv2.resize(
+                    mask_full.astype(np.uint8),
+                    (tile_size, tile_size),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(np.uint8)
+            else:
+                mask = mask_full.astype(np.uint8)
+        else:
+            # Remuestrear la máscara con el mismo método que los datos
+            mask = cv2.resize(
+                mask_full.astype(np.uint8),
+                (tile_size, tile_size),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(np.uint8)
+            
+    except Exception as e:
+        logger.warning(f"Error creando máscara para escena {scene['scene_id']}: {e}")
+        return None
+    
+    # Procesar todas las bandas usando el cache
+    for band_name in bands_to_load:
+        band_path = scene["bands"][band_name]
         try:
-            with rasterio.open(band_path) as src:
-                if src.crs != target_crs:
-                    tf = Transformer.from_crs(
-                        target_crs, src.crs, always_xy=True
-                    ).transform
-                    minx, miny = tf(bbox[0], bbox[1])
-                    maxx, maxy = tf(bbox[2], bbox[3])
-                    bbox_t = (minx, miny, maxx, maxy)
+            src = get_cached_dataset(band_path)
+            if src.crs != target_crs:
+                tf = Transformer.from_crs(
+                    target_crs, src.crs, always_xy=True
+                ).transform
+                minx, miny = tf(bbox[0], bbox[1])
+                maxx, maxy = tf(bbox[2], bbox[3])
+                bbox_t = (minx, miny, maxx, maxy)
+            else:
+                bbox_t = bbox
+            
+            win = from_bounds(*bbox_t, transform=src.transform)
+            
+            if win.width == 0 or win.height == 0:
+                logger.warning(f"Ventana vacía para escena {scene['scene_id']}, banda {band_name}: {win}")
+                continue
+            
+            # === NUEVA LÓGICA: DIVIDIR FLUJOS CON FLAG no_upsample ===
+            if no_upsample:
+                # Leer a resolución nativa y centrar en un lienzo 224×224
+                data = src.read(
+                    1, window=win, boundless=True, fill_value=0,
+                    resampling=Resampling.nearest
+                )
+                # Crear canvas del tamaño objetivo y centrar los datos nativos
+                canvas = np.zeros((tile_size, tile_size), data.dtype)
+                h, w = data.shape
+                y0 = (tile_size - h) // 2
+                x0 = (tile_size - w) // 2
+                
+                # Asegurar que no se excedan los límites del canvas
+                y1 = min(y0 + h, tile_size)
+                x1 = min(x0 + w, tile_size)
+                data_h = y1 - y0
+                data_w = x1 - x0
+                
+                if y0 >= 0 and x0 >= 0:
+                    canvas[y0:y1, x0:x1] = data[:data_h, :data_w]
                 else:
-                    bbox_t = bbox
+                    # Si los datos nativos son más grandes que el canvas, centrar tomando la parte central
+                    src_y0 = max(0, -y0)
+                    src_x0 = max(0, -x0)
+                    dst_y0 = max(0, y0)
+                    dst_x0 = max(0, x0)
+                    copy_h = min(h - src_y0, tile_size - dst_y0)
+                    copy_w = min(w - src_x0, tile_size - dst_x0)
+                    canvas[dst_y0:dst_y0+copy_h, dst_x0:dst_x0+copy_w] = data[src_y0:src_y0+copy_h, src_x0:src_x0+copy_w]
                 
-                win = from_bounds(*bbox_t, transform=src.transform)
+                data = canvas
+            else:
+                # Comportamiento normal con remuestreo directo
+                resampling = (Resampling.average   if scale < 1 else
+                             Resampling.bilinear  if scale > 1 else
+                             Resampling.nearest
+                             )
                 
-                if win.width == 0 or win.height == 0:
-                    logger.warning(f"Ventana vacía para escena {scene['scene_id']}, banda {band_name}: {win}")
-                    continue
-                
-                data = src.read(1, window=win, boundless=True, fill_value=0)
-                if data.size == 0:
-                    logger.warning(f"Datos vacíos para banda {band_name} en escena {scene['scene_id']}")
-                    continue
+                # Leer directamente al tamaño objetivo con un solo remuestreo
+                data = src.read(
+                    1, 
+                    window=win, 
+                    boundless=True, 
+                    fill_value=0,
+                    out_shape=(tile_size, tile_size),
+                    resampling=resampling
+                )
+            
+            if data.size == 0:
+                logger.warning(f"Datos vacíos para banda {band_name} en escena {scene['scene_id']}")
+                continue
 
-                if mask is None:
-                    # Asegurarse de que el polígono está en el mismo CRS que el raster
-                    if src.crs != target_crs:
-                        geom_ds = shapely.ops.transform(
-                            Transformer.from_crs(
-                                target_crs, src.crs, always_xy=True
-                            ).transform,
-                            geom,
-                        )
-                    else:
-                        geom_ds = geom
-
-                    # Crear máscara en resolución nativa
-                    mask_full = rasterize_mask(
-                        poly=geom_ds,  # shapely Polygon del edificio
-                        window=win,
-                        transform=src.window_transform(win),
-                        out_shape=(int(win.height), int(win.width)),
-                    )
-
-                    # Validar que mask_full no esté vacía
-                    if mask_full.size == 0 or mask_full.shape[0] == 0 or mask_full.shape[1] == 0:
-                        logger.warning(f"Máscara vacía para banda {band_name} en escena {scene['scene_id']}")
-                        continue
-
-                    # Validar que data tenga dimensiones válidas antes de calcular target_h/target_w
-                    if data.shape[0] == 0 or data.shape[1] == 0:
-                        logger.warning(f"Datos con dimensiones inválidas {data.shape} para banda {band_name} en escena {scene['scene_id']}")
-                        continue
-
-                    # Re-muestrear la máscara con el MISMO pipeline que el RGB
-                    target_h = int(data.shape[0] * scale)
-                    target_w = int(data.shape[1] * scale)
-                    
-                    # Validar que las dimensiones objetivo sean válidas
-                    if target_h <= 0 or target_w <= 0:
-                        logger.warning(f"Dimensiones objetivo inválidas {target_h}x{target_w} para banda {band_name} en escena {scene['scene_id']}")
-                        continue
-
-                    if scale != 1.0:
-                        # Validar dimensiones antes de resize
-                        if target_h <= 0 or target_w <= 0:
-                            logger.warning(f"Dimensiones inválidas para resize: {target_h}x{target_w}")
-                            continue
-                        mask_full = resize(
-                            mask_full,
-                            (target_h, target_w),
-                            order=0,
-                            mode="edge",
-                            preserve_range=True,
-                            anti_aliasing=False,
-                        )
-
-                    # Validar dimensiones antes de cv2.resize
-                    if mask_full.size == 0 or mask_full.shape[0] == 0 or mask_full.shape[1] == 0:
-                        logger.warning(f"Máscara vacía después de resize para banda {band_name}")
-                        continue
-
-                    mask = cv2.resize(
-                        mask_full.astype(np.uint8),
-                        (TILE_SIZE, TILE_SIZE),
-                        interpolation=cv2.INTER_NEAREST,
-                    ).astype(np.uint8)
-
-                # Validar que data no esté vacía
-                if data.size == 0 or data.shape[0] == 0 or data.shape[1] == 0:
-                    logger.warning(f"Datos vacíos para banda {band_name} antes del resize")
-                    continue
-                
-                # --- Remuestreo según escala ---
-                if scale == 1.0:
-                    data = cv2.resize(
-                        data.astype(np.float32),
-                        (TILE_SIZE, TILE_SIZE),
-                        interpolation=cv2.INTER_AREA
-                    )
-                else:
-                    # Control extra: scale debe ser finito y positivo
-                    if not np.isfinite(scale) or scale <= 0:
-                        logger.error(f"Scale inválido ({scale}) justo antes de resize para escena {scene['scene_id']}, banda {band_name}. Rellenando con ceros.")
-                        data = np.zeros((TILE_SIZE, TILE_SIZE), dtype=np.float32)
-                    else:
-                        target_h = int(TILE_SIZE * scale)
-                        target_w = int(TILE_SIZE * scale)
-                        if target_h <= 0 or target_w <= 0 or not np.isfinite(target_h) or not np.isfinite(target_w):
-                            logger.error(f"target_h/w inválidos ({target_h}, {target_w}) para escena {scene['scene_id']}, banda {band_name}. Rellenando con ceros.")
-                            data = np.zeros((TILE_SIZE, TILE_SIZE), dtype=np.float32)
-                        else:
-                            data = resize(
-                                data,
-                                (target_h, target_w),
-                                order=3,
-                                mode="edge",
-                                preserve_range=True,
-                                anti_aliasing=True,
-                            )
-                            if data.shape != (TILE_SIZE, TILE_SIZE):
-                                data = cv2.resize(
-                                    data.astype(np.float32),
-                                    (TILE_SIZE, TILE_SIZE),
-                                    interpolation=cv2.INTER_AREA
-                                )
-                band_arrays.append(data)
+            band_arrays.append(data)
+            loaded_band_files.append((band_name, str(band_path)))
         except Exception as e:
-            print(f"❌ Error procesando banda {band_name}: {e}")
+            logger.warning(f"Error procesando banda {band_name} en escena {scene['scene_id']}: {e}")
             continue
     if not band_arrays:
-        print(f"❌ FALLO TOTAL: Todas las bandas fallaron para escena {'PRE' if is_pre else 'POST'} {scene['scene_id']}")
+        logger.warning(f"Todas las bandas fallaron para escena {'PRE' if is_pre else 'POST'} {scene['scene_id']}")
         return None
+    
+    # Actualizar band_names para reflejar solo las bandas cargadas exitosamente
+    band_names = [name for name, _ in loaded_band_files]
     
     # Si no se creó máscara (por problemas con geometrías), crear una máscara por defecto
     if mask is None:
-        print(f"⚠️  No se pudo crear máscara para escena {scene['scene_id']}, usando máscara por defecto")
-        mask = np.ones((TILE_SIZE, TILE_SIZE), dtype=np.uint8)
+        logger.warning(f"No se pudo crear máscara para escena {scene['scene_id']}, usando máscara por defecto")
+        mask = np.ones((tile_size, tile_size), dtype=np.uint8)
     
     # === NORMALIZACIÓN POR PERCENTILES ===
     full_stack = np.stack(band_arrays, axis=-1).astype(np.float32)
     # Si más del 50% del stack es 0, devolver None
     zero_frac = np.mean(full_stack == 0)
-    if zero_frac > 0.5:
-        #print(f"❌ Más del 50% del stack es 0 (frac={zero_frac:.2f}), tile descartado para escena {scene['scene_id']}")
+    
+    # Sólo descarta si *sí* había upsample y más de la mitad son ceros
+    # Cuando no hay upsample el lienzo puede llevar mucho relleno 0 → relájalo
+    if not no_upsample and zero_frac > 0.5:
         return None
+    
+    # Usar variable global P que ahora está disponible en los workers
+    global P
+    sensor = scene.get('properties', {}).get('platform', 'unknown').lower() if 'properties' in scene else scene.get('sensor', 'unknown').lower()
     for i, band_name in enumerate(band_names):
-        if P and band_name in P:
-            p2, p98 = P[band_name]
-            full_stack[..., i] = np.clip(full_stack[..., i], p2, p98)
-            full_stack[..., i] = (full_stack[..., i] - p2) / max(p98 - p2, 1e-8)
+        pkey = (sensor, band_name)
+        if P and pkey in P:
+            p1, p99 = P[pkey]  # Usar PERCENTILE_LOW/HIGH (1-99%)
+            full_stack[..., i] = np.clip(full_stack[..., i], p1, p99)
+            full_stack[..., i] = (full_stack[..., i] - p1) / max(p99 - p1, 1e-8)
         else:
             mn = full_stack[..., i].min()
             mx = full_stack[..., i].max()
             full_stack[..., i] = (full_stack[..., i] - mn) / max(mx - mn, 1e-8)
+    
+    # Aplicar mejora de calidad visual
+    full_stack = enhance_image_quality(full_stack)
 
-    # --- REORDENAR A RGB SI EXISTEN ---
+    # Reordenar a RGB
     desired_order = ["red", "green", "blue"]
     ordered_arrays = []
+    
     for band in desired_order:
-        if band in band_names:
+        # Primero buscar versión aligned, luego normal
+        aligned_band = f"{band}_aligned"
+        if aligned_band in band_names:
+            idx = band_names.index(aligned_band)
+            ordered_arrays.append(full_stack[..., idx])
+        elif band in band_names:
             idx = band_names.index(band)
             ordered_arrays.append(full_stack[..., idx])
         else:
-            # Si falta la banda, rellena con ceros
-            ordered_arrays.append(np.zeros_like(full_stack[..., 0]))
+            # Si falta la banda, usar una banda sustituta apropiada (priorizando _aligned)
+            if band == 'blue':
+                # Para banda azul, priorizar coastal (WorldView-2), luego green, luego red
+                if 'coastal_aligned' in band_names:
+                    substitute_band = 'coastal_aligned'
+                elif 'coastal' in band_names:
+                    substitute_band = 'coastal'
+                elif 'green_aligned' in band_names:
+                    substitute_band = 'green_aligned'
+                elif 'green' in band_names:
+                    substitute_band = 'green'
+                elif 'red_aligned' in band_names:
+                    substitute_band = 'red_aligned'
+                elif 'red' in band_names:
+                    substitute_band = 'red'
+                else:
+                    substitute_band = band_names[0]
+            elif band == 'green':
+                # Para banda verde, usar rojo como sustituto
+                if 'red_aligned' in band_names:
+                    substitute_band = 'red_aligned'
+                elif 'red' in band_names:
+                    substitute_band = 'red'
+                else:
+                    substitute_band = band_names[0]
+            elif band == 'red':
+                # Para banda roja, usar verde como sustituto
+                if 'green_aligned' in band_names:
+                    substitute_band = 'green_aligned'
+                elif 'green' in band_names:
+                    substitute_band = 'green'
+                else:
+                    substitute_band = band_names[0]
+            else:
+                # Usar la primera banda disponible
+                substitute_band = band_names[0]
+            
+            substitute_idx = band_names.index(substitute_band)
+            ordered_arrays.append(full_stack[..., substitute_idx])
+    
     # Si hay menos de 3 bandas, rellena hasta 3
     while len(ordered_arrays) < 3:
         ordered_arrays.append(np.zeros_like(full_stack[..., 0]))
 
     rgb = np.stack(ordered_arrays, axis=-1)
 
-    # Apilar máscara después de RGB
-    rgb_mask = np.concatenate([rgb, mask[..., None]], axis=-1)
 
-    # Índices de bandas que NO son red/green/blue/pan
-    # Incluir pan en las bandas extra ya que tiene alta resolución
-    extra_bands = ["pan", "nir", "swir1", "swir2", "coastal", "yellow", "rededge"]
-    extra_idx = [i for i, b in enumerate(band_names) if b not in desired_order and b in extra_bands]
 
-    if extra_idx:
-        extra_arrays = full_stack[..., extra_idx]  # <- del stack original
-        stack_final = np.concatenate([rgb_mask, extra_arrays], axis=-1)
-    else:
-        stack_final = rgb_mask
+    # Apilar máscara después de RGB (solo RGB + máscara = 4 canales)
+    stack_final = np.concatenate([rgb, mask[..., None]], axis=-1)
 
-    #print(f"✅ Escena {scene['scene_id']} procesada exitosamente - shape final: {stack_final.shape}")
     try:
-        return (stack_final.transpose(2, 0, 1) * 65535).round().astype(np.uint16)
+        result = (stack_final.transpose(2, 0, 1) * 65535).round().astype(np.uint16)
+        return result
     except Exception as e:
-        logger.warning(f"Error en normalización final: {e}")
+        logger.warning(f"Error en normalización final para escena {scene['scene_id']}: {e}")
         return None
 
 
 
 
 
+def _init_worker(shared_P, shared_scenes, tgt_gsd):
+    """Inicializador para workers del ProcessPoolExecutor."""
+    global P, SCENES, TARGET_GSD, RASTER_CACHE
+    P = shared_P         # diccionario de percentiles
+    SCENES = shared_scenes
+    TARGET_GSD = tgt_gsd
+    RASTER_CACHE = {}    # Cache para datasets de rasterio
+    # Log para confirmar que los percentiles se pasaron correctamente
+    if P:
+        logger.debug(f"Worker inicializado con {len(P)} percentiles y TARGET_GSD={TARGET_GSD}")
+    else:
+        logger.warning("Worker inicializado sin percentiles (P=None)")
+
+def get_cached_dataset(path):
+    """Obtiene un dataset de rasterio con cache para evitar aperturas repetidas."""
+    global RASTER_CACHE
+    if path not in RASTER_CACHE:
+        RASTER_CACHE[path] = rasterio.open(path, sharing=True)
+    return RASTER_CACHE[path]
+
+def cleanup_raster_cache():
+    """Limpia el cache de datasets de rasterio para liberar memoria."""
+    global RASTER_CACHE
+    for dataset in RASTER_CACHE.values():
+        try:
+            dataset.close()
+        except:
+            pass
+    RASTER_CACHE.clear()
+
 def process_tile_worker(args):
-    wkb_geom, scenes, crs_wkt, output_dir, fid, damage = args
+    wkb_geom, scenes_data, crs_wkt, output_dir, fid, damage, buffer_meters, tile_size, use_multi_scene = args
     geometry = wkb.loads(wkb_geom)
     crs = CRS.from_wkt(crs_wkt)
-    return process_tile(geometry, scenes, crs, output_dir, fid, damage)
+    
+    # Extraer scenes, activation_date y target_gsd del tuple
+    if len(scenes_data) == 3:
+        scenes, activation_date, target_gsd = scenes_data
+    else:
+        # Backward compatibility
+        scenes, activation_date = scenes_data
+        target_gsd = 2.0
+    
+    # Configurar TARGET_GSD para este worker
+    global TARGET_GSD
+    TARGET_GSD = target_gsd
+    
+    try:
+        if use_multi_scene:
+            return process_tile_multi_scene(geometry, (scenes, activation_date), crs, output_dir, fid, damage, buffer_meters, tile_size)
+        else:
+            return process_tile(geometry, (scenes, activation_date), crs, output_dir, fid, damage, buffer_meters, tile_size)
+    except Exception as e:
+        # Solo logear errores críticos que no deberían ocurrir
+        logger.error(f"Error crítico procesando FID {fid}: {e}")
+        return None
 
 
-def pick_scene_for_geom(scenes, geom, crs, is_pre, act_dt, min_cover=0.8):
+def pick_scene_for_geom_with_fallback(scenes, geom, crs, is_pre, act_dt, buffer_meters):
     """
-    Devuelve la escena que contiene el edificio con una cobertura mínima y cuya fecha está más cercana al activation_date
-    (antes para pre, después/igual para post). Si no hay ninguna, devuelve None.
-    En caso de empate en cobertura, desempata por cercanía temporal.
+    Selecciona la mejor escena para un polígono usando un enfoque de fallback progresivo.
+    
+    Estrategia:
+    1. Primero busca escenas con alta cobertura (>=80%)
+    2. Si no encuentra, reduce progresivamente los requisitos: 60%, 40%, 20%
+    3. Como último recurso, usa cualquier escena que tenga intersección
+    4. Prioriza por cobertura, luego por cercanía temporal
+    
+    Args:
+        scenes: Lista de escenas disponibles
+        geom: Geometría del polígono/edificio
+        crs: Sistema de coordenadas
+        is_pre: True para escenas PRE, False para POST
+        act_dt: Fecha de activación del terremoto
+        buffer_meters: Buffer en metros alrededor del polígono
+    
+    Returns:
+        Escena seleccionada o None si no hay ninguna del período correcto
     """
-    buffered_geom = buffer_geom(geom, crs)
-    candidates = []
+    buffered_geom = buffer_geom(geom, crs, buffer_meters)
+    
+    # Transform buffered geometry to WGS84 (EPSG:4326) to match scene geometries
+    if crs.to_epsg() != 4326:
+        try:
+            transformer_to_wgs = Transformer.from_crs(crs, 4326, always_xy=True)
+            buffered_geom_wgs = shapely.ops.transform(transformer_to_wgs.transform, buffered_geom)
+        except Exception as e:
+            logger.warning(f"Error transforming buffered geometry to WGS84: {e}")
+            buffered_geom_wgs = buffered_geom  # fallback – may lead to 0-coverage
+    else:
+        buffered_geom_wgs = buffered_geom
+    
+    # Filtrar escenas por período temporal primero
+    temporal_candidates = []
     for scene in scenes:
         if not scene["date"]:
             continue
@@ -1206,79 +1461,367 @@ def pick_scene_for_geom(scenes, geom, crs, is_pre, act_dt, min_cover=0.8):
             scene["date"] = scene["date"].replace(tzinfo=timezone.utc)
 
         # Comprobar si la escena es pre o post
-        is_candidate = (is_pre and scene["date"] < act_dt) or (
+        is_candidate = (is_pre and scene["date"] <= act_dt) or (
             not is_pre and scene["date"] >= act_dt
         )
         if not is_candidate:
             continue
 
-        # 3. Umbral temporal para escenas pre-evento
-        if is_pre and (act_dt - scene["date"]).days > 550:
+        # Umbral temporal para escenas pre-evento – ¡eliminar!
+        # if is_pre and (act_dt - scene["date"]).days > 550:
+        #     continue
+            
+        temporal_candidates.append(scene)
+    
+    if not temporal_candidates:
+        logger.debug(f"No hay escenas {'PRE' if is_pre else 'POST'} disponibles para el período")
+        return None
+    
+    logger.debug(f"Encontradas {len(temporal_candidates)} escenas {'PRE' if is_pre else 'POST'} en el período correcto")
+    
+    # Niveles de cobertura mínima progresivos
+    coverage_thresholds = [0.8, 0.6, 0.4, 0.2, 0.05, 0.01]  # 80%, 60%, 40%, 20%, 5%, 1%
+    
+    for min_cover in coverage_thresholds:
+        candidates = []
+        
+        # Evaluar cobertura para cada escena
+        for scene in temporal_candidates:
+            try:
+                # Use WGS84-aligned geometry for intersection
+                intersection = scene["geometry"].intersection(buffered_geom_wgs)
+                cover = intersection.area / buffered_geom_wgs.area if buffered_geom_wgs.area > 0 else 0
+            except Exception as e:
+                logger.warning(f"Error calculando intersección para escena {scene['scene_id']}: {e}")
+                cover = 0
+
+            if cover >= min_cover:
+                candidates.append((scene, cover))
+
+        if candidates:
+            # Ordenar por cobertura (descendente) y luego por cercanía temporal (ascendente)
+            def sort_key(t):
+                scene, cover = t
+                temporal_dist = abs(act_dt - scene["date"]).total_seconds()
+                cloud_cover = scene.get("cloud_cover", 999)
+                off_nadir = scene.get("sat:off_nadir", 999)
+                
+                # Priorizar cobertura alta, luego cercanía temporal
+                return (-cover, temporal_dist, cloud_cover, off_nadir)
+            
+            candidates.sort(key=sort_key)
+            best_scene, best_cover = candidates[0]
+            
+            logger.debug(f"Escena {'PRE' if is_pre else 'POST'} seleccionada: {best_scene['scene_id']} "
+                        f"(cobertura: {best_cover:.2f}, umbral: {min_cover:.2f}, "
+                        f"fecha: {best_scene['date'].date()})")
+            
+            return best_scene
+            
+        logger.debug(f"No se encontraron escenas con cobertura >= {min_cover:.1%}")
+    
+    # Si llegamos aquí, no hay ninguna escena que cubra el polígono ni siquiera mínimamente
+    logger.warning(f"No se encontró escena {'PRE' if is_pre else 'POST'} que cubra el polígono "
+                  f"(probado hasta {coverage_thresholds[-1]:.1%} de cobertura). "
+                  f"Esto puede indicar que el edificio está fuera del área de cobertura de las escenas disponibles.")
+    return None
+
+
+
+
+def find_best_scene_for_polygon(scenes, geom, crs, is_pre, act_dt, buffer_meters, min_cover=0.6):
+    """
+    Encuentra la mejor escena que cubra un polígono específico.
+    
+    Args:
+        scenes: Lista de todas las escenas disponibles
+        geom: Geometría del polígono
+        crs: Sistema de coordenadas
+        is_pre: True para escenas PRE, False para POST
+        act_dt: Fecha de activación del terremoto
+        buffer_meters: Buffer alrededor del polígono
+        min_cover: Cobertura mínima requerida (default 60%)
+    
+    Returns:
+        Mejor escena para este polígono o None
+    """
+    buffered_geom = buffer_geom(geom, crs, buffer_meters)
+    # Transform to WGS84 to align with scene geometries
+    if crs.to_epsg() != 4326:
+        try:
+            transformer_to_wgs = Transformer.from_crs(crs, 4326, always_xy=True)
+            buffered_geom_wgs = shapely.ops.transform(transformer_to_wgs.transform, buffered_geom)
+        except Exception as e:
+            logger.warning(f"Error transforming buffered geometry to WGS84: {e}")
+            buffered_geom_wgs = buffered_geom
+    else:
+        buffered_geom_wgs = buffered_geom
+    
+    candidates = []
+    
+    for scene in scenes:
+        if not scene["date"]:
             continue
+
+        # Asegurar timezone
+        if scene["date"].tzinfo is None:
+            scene["date"] = scene["date"].replace(tzinfo=timezone.utc)
+
+        # Filtrar por período temporal
+        is_candidate = (is_pre and scene["date"] <= act_dt) or (
+            not is_pre and scene["date"] >= act_dt
+        )
+        if not is_candidate:
+            continue
+
+        # Umbral temporal para pre-evento – ¡eliminar!
+        # if is_pre and (act_dt - scene["date"]).days > 550:
+        #     continue
 
         # Calcular cobertura
         try:
-            intersection = scene["geometry"].intersection(buffered_geom)
-            cover = intersection.area / buffered_geom.area
+            # Use WGS84-aligned geometry for intersection
+            intersection = scene["geometry"].intersection(buffered_geom_wgs)
+            cover = intersection.area / buffered_geom_wgs.area if buffered_geom_wgs.area > 0 else 0
         except Exception as e:
-            logger.warning(
-                f"Error calculando intersección para escena {scene['scene_id']}: {e}"
-            )
+            logger.warning(f"Error calculando intersección para escena {scene['scene_id']}: {e}")
             cover = 0
 
         if cover >= min_cover:
             candidates.append((scene, cover))
 
     if not candidates:
-        # logger.debug(
-        #     f"No scene con cobertura >={min_cover*100}% para {'pre' if is_pre else 'post'} en fecha {act_dt}"
-        # )
         return None
 
-    # Ordenar priorizando cobertura alta (>95%) y luego cercanía temporal
-    # Si varias escenas tienen cobertura similar (diferencia <5%), priorizar cercanía temporal
+    # Ordenar por cobertura (desc) y luego cercanía temporal (asc)
     def sort_key(t):
         scene, cover = t
         temporal_dist = abs(act_dt - scene["date"]).total_seconds()
         cloud_cover = scene.get("cloud_cover", 999)
         off_nadir = scene.get("sat:off_nadir", 999)
-        
-        # Si la cobertura es casi perfecta (>0.95), priorizar tiempo
-        if cover > 0.95:
-            return (0, temporal_dist, cloud_cover, off_nadir)
-        else:
-            # Para coberturas menores, priorizar cobertura primero
-            return (1, -cover, temporal_dist, cloud_cover, off_nadir)
+        return (-cover, temporal_dist, cloud_cover, off_nadir)
     
     candidates.sort(key=sort_key)
-
-    # Debug: mostrar los primeros candidatos para entender la selección
-    if len(candidates) > 1:
-        logger.debug(f"Scene selection for {'PRE' if is_pre else 'POST'}:")
-        for i, (scene, cover) in enumerate(candidates[:3]):  # Solo los 3 primeros
-            time_diff = abs(act_dt - scene["date"]).total_seconds() / 3600
-            logger.debug(f"  {i+1}. {scene['scene_id']} - Cover: {cover:.3f}, Time: {time_diff:.1f}h")
-
-    # Loguear la escena seleccionada y sus competidoras
-    # best_scene, best_cover = candidates[0]
-    # logger.info(
-    #     f"Seleccionada {'PRE' if is_pre else 'POST'}: {best_scene['scene_id']} "
-    #     f"({best_scene['date'].date()}) con cover {best_cover:.2f}. "
-    #     f"Competidoras: {len(candidates)-1}"
-    # )
     return candidates[0][0]
 
 
-def process_tile(building, scenes, crs, output_dir, fid, damage_label):
+def create_scene_polygon_mapping(all_scenes, polygons, crs, activation_date, buffer_meters):
+    """
+    Crea un mapeo de qué escenas usar para cada polígono para maximizar la cobertura.
+    
+    Args:
+        all_scenes: Lista de todas las escenas disponibles
+        polygons: Lista de polígonos a procesar
+        crs: Sistema de coordenadas
+        activation_date: Fecha de activación del terremoto
+        buffer_meters: Buffer alrededor de polígonos
+    
+    Returns:
+        dict: {
+            'pre_mapping': {polygon_idx: scene},
+            'post_mapping': {polygon_idx: scene},
+            'coverage_stats': {...}
+        }
+    """
+    pre_mapping = {}
+    post_mapping = {}
+    coverage_stats = {
+        'total_polygons': len(polygons),
+        'pre_covered': 0,
+        'post_covered': 0,
+        'pre_scenes_used': set(),
+        'post_scenes_used': set()
+    }
+    
+    logger.info(f"Creando mapeo de escenas para {len(polygons)} polígonos...")
+    
+    for idx, polygon in enumerate(polygons):
+        # Buscar mejor escena PRE para este polígono
+        pre_scene = find_best_scene_for_polygon(
+            all_scenes, polygon, crs, is_pre=True, 
+            act_dt=activation_date, buffer_meters=buffer_meters
+        )
+        
+        # Buscar mejor escena POST para este polígono  
+        post_scene = find_best_scene_for_polygon(
+            all_scenes, polygon, crs, is_pre=False, 
+            act_dt=activation_date, buffer_meters=buffer_meters
+        )
+        
+        if pre_scene:
+            pre_mapping[idx] = pre_scene
+            coverage_stats['pre_covered'] += 1
+            coverage_stats['pre_scenes_used'].add(pre_scene['scene_id'])
+            
+        if post_scene:
+            post_mapping[idx] = post_scene
+            coverage_stats['post_covered'] += 1
+            coverage_stats['post_scenes_used'].add(post_scene['scene_id'])
+            
+        if idx % 50 == 0:  # Log progreso cada 50 polígonos
+            logger.debug(f"Procesados {idx}/{len(polygons)} polígonos...")
+    
+    # Estadísticas finales
+    pre_coverage_pct = (coverage_stats['pre_covered'] / coverage_stats['total_polygons']) * 100
+    post_coverage_pct = (coverage_stats['post_covered'] / coverage_stats['total_polygons']) * 100
+    
+    logger.info(f"Mapeo completado:")
+    logger.info(f"  PRE: {coverage_stats['pre_covered']}/{coverage_stats['total_polygons']} polígonos cubiertos ({pre_coverage_pct:.1f}%)")
+    logger.info(f"  POST: {coverage_stats['post_covered']}/{coverage_stats['total_polygons']} polígonos cubiertos ({post_coverage_pct:.1f}%)")
+    logger.info(f"  Escenas PRE usadas: {len(coverage_stats['pre_scenes_used'])}")
+    logger.info(f"  Escenas POST usadas: {len(coverage_stats['post_scenes_used'])}")
+    
+    return {
+        'pre_mapping': pre_mapping,
+        'post_mapping': post_mapping,
+        'coverage_stats': coverage_stats
+    }
+
+
+
+
+
+
+
+def process_tile_multi_scene(building, scenes, crs, output_dir, fid, damage_label, buffer_meters, tile_size=224):
+    """
+    Versión mejorada de process_tile que puede usar múltiples escenas por tile para maximizar la cobertura de polígonos.
+    
+    En lugar de seleccionar 1 escena PRE + 1 escena POST para todo el tile,
+    encuentra la mejor escena PRE y POST para cada polígono individual.
+    """
+    all_scenes, activation_date = scenes
+    
+    # Usar método directo sin crear mapeo masivo para un solo polígono
+    pre_scene = pick_scene_for_geom_with_fallback(
+        all_scenes, building, crs, is_pre=True, act_dt=activation_date, buffer_meters=buffer_meters
+    )
+    post_scene = pick_scene_for_geom_with_fallback(
+        all_scenes, building, crs, is_pre=False, act_dt=activation_date, buffer_meters=buffer_meters
+    )
+    
+    if not pre_scene and not post_scene:
+        # logger.warning(f"No se encontraron escenas PRE ni POST para el polígono FID {fid}")
+        return None
+        
+    if not pre_scene:
+        # logger.warning(f"No se encontró escena PRE para el polígono FID {fid}")
+        # Fallback a selección global
+        pre_scene_global, _ = select_best_scenes(all_scenes, activation_date)
+        pre_scene = pre_scene_global
+        
+    if not post_scene:
+        # logger.warning(f"No se encontró escena POST para el polígono FID {fid}")
+        # Fallback a selección global
+        _, post_scene_global = select_best_scenes(all_scenes, activation_date)
+        post_scene = post_scene_global
+
+    # Log de las escenas seleccionadas para este polígono (solo en debug)
+    if pre_scene and post_scene:
+        pass  # Log removido para limpiar output
+    
+    # Resto del procesamiento igual que process_tile original
+    if pre_scene and post_scene:
+        # Validación temporal
+        if not (pre_scene["date"] < activation_date <= post_scene["date"]):
+            logger.error("¡Incoherencia temporal! Abort tile.")
+            return None
+
+    # Buffer consistente
+    buffered_geom = buffer_geom(building, crs, buffer_meters)
+    if not buffered_geom.is_valid:
+        buffered_geom = buffered_geom.buffer(0)
+    bbox = buffered_geom.bounds
+    
+    # Procesar escena PRE con fallback sistemático
+    pre_data = None
+    if pre_scene:
+        pre_data = process_scene(pre_scene, bbox, crs, is_pre=True, geom=building, tile_size=tile_size)
+        
+        # Si falló, probar todas las escenas disponibles
+        if pre_data is None:
+            # Obtener todas las escenas PRE ordenadas por prioridad
+            pre_scenes = [s for s in all_scenes if s["date"] < activation_date]
+            if pre_scenes:
+                # Ordenar por fecha (más cercana a la activación primero)
+                pre_scenes.sort(key=lambda x: abs((activation_date - x["date"]).total_seconds()))
+                
+                for i, alt_scene in enumerate(pre_scenes[:5]):  # Probar máximo 5 escenas
+                    if alt_scene['scene_id'] == pre_scene['scene_id']:
+                        continue  # Saltar la escena que ya falló
+                        
+                    alt_data = process_scene(alt_scene, bbox, crs, is_pre=True, geom=building, tile_size=tile_size)
+                    
+                    if alt_data is not None:
+                        pre_scene = alt_scene  # Actualizar la escena usada
+                        pre_data = alt_data
+                        break
+    
+    # Procesar escena POST con fallback sistemático
+    post_data = None
+    if post_scene:
+        post_data = process_scene(post_scene, bbox, crs, is_pre=False, geom=building, tile_size=tile_size)
+        
+        # Si falló, probar todas las escenas disponibles
+        if post_data is None:
+            # Obtener todas las escenas POST ordenadas por prioridad
+            post_scenes = [s for s in all_scenes if s["date"] >= activation_date]
+            if post_scenes:
+                # Ordenar por fecha (más cercana a la activación primero)
+                post_scenes.sort(key=lambda x: abs((activation_date - x["date"]).total_seconds()))
+                
+                for i, alt_scene in enumerate(post_scenes[:5]):  # Probar máximo 5 escenas
+                    if alt_scene['scene_id'] == post_scene['scene_id']:
+                        continue  # Saltar la escena que ya falló
+                        
+                    alt_data = process_scene(alt_scene, bbox, crs, is_pre=False, geom=building, tile_size=tile_size)
+                    
+                    if alt_data is not None:
+                        post_scene = alt_scene  # Actualizar la escena usada
+                        post_data = alt_data
+                        break
+
+    # Sin alineación entre escenas pre/post
+    shift_xy = (0.0, 0.0)
+
+    if pre_data is None:
+        pre_data = np.zeros((1, tile_size, tile_size), np.uint16)
+        has_pre = 0
+    else:
+        has_pre = 1
+    if post_data is None:
+        post_data = np.zeros((1, tile_size, tile_size), np.uint16)
+        has_post = 0
+    else:
+        has_post = 1
+    if damage_label is None or (isinstance(damage_label, float) and math.isnan(damage_label)):
+        damage_label = -1
+    tile_path = output_dir / f"{fid}.npz"
+    
+    np.savez_compressed(tile_path, pre=pre_data, post=post_data)
+    
+    return dict(
+        fid=fid,
+        tile_path=str(tile_path),
+        damaged=int(damage_label),
+        has_pre=has_pre,
+        has_post=has_post,
+        shift_x=shift_xy[1],
+        shift_y=shift_xy[0],
+    )
+
+
+# Mantener la función original como fallback
+def process_tile(building, scenes, crs, output_dir, fid, damage_label, buffer_meters, tile_size=224):
     all_scenes, activation_date = scenes
     # logger.debug(f"All scenes before select_best_scenes: {all_scenes}")
     pre_scene_global, post_scene_global = select_best_scenes(all_scenes, activation_date)
     pre_scene = (
-        pick_scene_for_geom(all_scenes, building, crs, True, activation_date)
+        pick_scene_for_geom_with_fallback(all_scenes, building, crs, True, activation_date, buffer_meters)
         or pre_scene_global
     )
     post_scene = (
-        pick_scene_for_geom(all_scenes, building, crs, False, activation_date)
+        pick_scene_for_geom_with_fallback(all_scenes, building, crs, False, activation_date, buffer_meters)
         or post_scene_global
     )
 
@@ -1319,18 +1862,18 @@ def process_tile(building, scenes, crs, output_dir, fid, damage_label):
             return None
 
     # Buffer consistente
-    buffered_geom = buffer_geom(building, crs)
+    buffered_geom = buffer_geom(building, crs, buffer_meters)
     # Sanity-check para evitar geometrías self-intersecting
     if not buffered_geom.is_valid:
         buffered_geom = buffered_geom.buffer(0)
     bbox = buffered_geom.bounds
     pre_data = (
-        process_scene(pre_scene, bbox, crs, is_pre=True, geom=building)
+        process_scene(pre_scene, bbox, crs, is_pre=True, geom=building, tile_size=tile_size)
         if pre_scene
         else None
     )
     post_data = (
-        process_scene(post_scene, bbox, crs, is_pre=False, geom=building)
+        process_scene(post_scene, bbox, crs, is_pre=False, geom=building, tile_size=tile_size)
         if post_scene
         else None
     )
@@ -1339,18 +1882,16 @@ def process_tile(building, scenes, crs, output_dir, fid, damage_label):
     shift_xy = (0.0, 0.0)
 
     if pre_data is None:
-        #logger.warning(f"FID {fid}: PRE data es None - escena seleccionada: {pre_scene['scene_id'] if pre_scene else 'None'}")
-        pre_data = np.zeros((1, TILE_SIZE, TILE_SIZE), np.uint16)
+        pre_data = np.zeros((1, tile_size, tile_size), np.uint16)
         has_pre = 0
+        logger.warning(f"FID {fid}: No se encontró escena PRE disponible")
     else:
-        logger.debug(f"FID {fid}: PRE data OK - shape: {pre_data.shape}")
         has_pre = 1
     if post_data is None:
-        logger.warning(f"FID {fid}: POST data es None - escena seleccionada: {post_scene['scene_id'] if post_scene else 'None'}")
-        post_data = np.zeros((1, TILE_SIZE, TILE_SIZE), np.uint16)
+        post_data = np.zeros((1, tile_size, tile_size), np.uint16)
         has_post = 0
+        logger.warning(f"FID {fid}: No se encontró escena POST disponible")
     else:
-        logger.debug(f"FID {fid}: POST data OK - shape: {post_data.shape}")
         has_post = 1
     if damage_label is None or (isinstance(damage_label, float) and math.isnan(damage_label)):
         damage_label = -1
@@ -1366,20 +1907,23 @@ def process_tile(building, scenes, crs, output_dir, fid, damage_label):
         shift_y=shift_xy[0],
     )
 
-def process_gpkg(gpkg_path, training_root, output_root, split, max_workers=12, satellites=None):
-    logger.info(f"Procesando {gpkg_path}")
+def process_gpkg(gpkg_path, training_root, output_root, split, buffer_meters, max_workers=12, satellites=None, tile_size=224, use_multi_scene=True, target_gsd=None):
+    global TARGET_GSD
     # Extraer nombre único de área/ciudad del archivo GPKG
     city_area = gpkg_path.stem.replace('_Training', '').replace('_training', '').replace('_Testing', '').replace('_testing', '').lower()
     output_dir = output_root / split / city_area
     output_dir.mkdir(parents=True, exist_ok=True)
     gdf = load_gpkg_with_fiona(gpkg_path)
-    logger.info(f"Edificios en GPKG: {len(gdf)}")
+    # logger.info(f"Procesando {gpkg_path.name} ({len(gdf)} edificios)")
+    # logger.info(f"Edificios en GPKG: {len(gdf)}")
+    
     # Print columns for debugging Afghanistan areas
     if "afghanistan" in city_area:
-        logger.info(f"Columnas en {gpkg_path}: {list(gdf.columns)}")
+        logger.debug(f"Columnas en {gpkg_path}: {list(gdf.columns)}")
     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notnull()]
     gdf['geometry'] = gdf['geometry'].buffer(0)
-    logger.info(f"Edificios tras limpieza: {len(gdf)}")
+    # logger.info(f"Edificios tras limpieza: {len(gdf)}")
+    
     if gdf.crs is None:
         logger.warning(f"GPKG {gpkg_path} no tiene CRS. Asignando EPSG:4326 por defecto.")
         gdf.set_crs(4326, inplace=True)
@@ -1395,11 +1939,12 @@ def process_gpkg(gpkg_path, training_root, output_root, split, max_workers=12, s
             gdf["id"] = gdf.index
             fid_col = "id"
 
-    logger.info(f"Columna FID: {fid_col}")
+    # logger.info(f"Columna FID: {fid_col}")
     event_name = gpkg_path.parent.name
     call_dir = training_root / event_name
     activation_date = get_activation_date(call_dir)
-    logger.info(f"Fecha de activación: {activation_date}")
+    # logger.info(f"Fecha de activación: {activation_date}")
+    
     # Load temporal interval from collection.json
     interval_start, interval_end = None, None
     coll_json = call_dir / "collection.json"
@@ -1414,32 +1959,44 @@ def process_gpkg(gpkg_path, training_root, output_root, split, max_workers=12, s
             logger.warning(f"Error leyendo intervalo temporal en {coll_json}: {e}")
     else:
         logger.warning(f"No se encontró collection.json en {call_dir}")
-    scenes = find_scenes_for_aoi(aoi_geom_wgs, call_dir, interval_start, interval_end, satellites)
+    scenes = find_scenes_for_aoi(aoi_geom_wgs, call_dir, None, None, satellites)
     logger.info(f"Escenas encontradas: {len(scenes)}")
+    if scenes:
+        for i, scene in enumerate(scenes, 1):
+            logger.info(f"  {i}. {scene['scene_id']} (GSD: {scene['gsd']:.2f}m, fecha: {scene['date'].strftime('%Y-%m-%d') if scene['date'] else 'N/A'})")
+    
     if not scenes:
         logger.warning(f"No se encontraron escenas para {gpkg_path}")
-        logger.info(f"Call directory: {call_dir}")
-        logger.info(f"AOI geometry bounds: {aoi_geom_wgs.bounds}")
         return []
+    
+    # Determinar TARGET_GSD automáticamente basándose en las escenas o usar el especificado por el usuario
+    if target_gsd is not None:
+        TARGET_GSD = target_gsd
+        # logger.info(f"Usando TARGET_GSD especificado por el usuario: {TARGET_GSD:.2f}m")
+    else:
+        # logger.info("Determinando TARGET_GSD automáticamente basándose en las escenas...")
+        TARGET_GSD = determine_optimal_target_gsd(scenes)
+        # logger.info(f"TARGET_GSD determinado automáticamente: {TARGET_GSD:.2f}m")
     
     # Seleccionar las mejores escenas globales para mostrar fechas de referencia
     pre_scene_global, post_scene_global = select_best_scenes(scenes, activation_date)
-    if pre_scene_global:
-        logger.info(f"Fecha de escena PRE de referencia: {pre_scene_global['date']}")
-    else:
-        logger.info("No se encontró escena PRE de referencia")
+    # if pre_scene_global:
+    #     logger.info(f"Mejor escena PRE seleccionada: {pre_scene_global['scene_id']} "
+    #                f"(fecha: {pre_scene_global['date']}, nubes: {pre_scene_global.get('cloud_cover', 'None')}%, "
+    #                f"off-nadir: {pre_scene_global.get('sat:off_nadir', 'None')}°)")
+    # else:
+    #     logger.info("No se encontró escena PRE de referencia")
     
-    if post_scene_global:
-        logger.info(f"Fecha de escena POST de referencia: {post_scene_global['date']}")
-    else:
-        logger.info("No se encontró escena POST de referencia")
+    # if post_scene_global:
+    #     logger.info(f"Mejor escena POST seleccionada: {post_scene_global['scene_id']} "
+    #                f"(fecha: {post_scene_global['date']}, nubes: {post_scene_global.get('cloud_cover', 'None')}%, "
+    #                f"off-nadir: {post_scene_global.get('sat:off_nadir', 'None')}°)")
+    # else:
+    #     logger.info("No se encontró escena POST de referencia")
     
     meta_data = []
     damage_col = 'damaged' if 'damaged' in gdf.columns else None
-    logger.info(f"Columna de daño: {damage_col}")
-    
-    # No es necesario seleccionar las escenas aquí, se hará por edificio
-    # pre_scene, post_scene = select_best_scenes(scenes, activation_date)
+    # logger.info(f"Columna de daño: {damage_col}")
     
     crs_wkt = gdf.crs.to_wkt()
     tasks = []
@@ -1447,12 +2004,17 @@ def process_gpkg(gpkg_path, training_root, output_root, split, max_workers=12, s
         fid = row[fid_col]
         damage = row[damage_col] if damage_col else -1
         
-        # Pasamos todas las escenas y la fecha de activación a cada worker
-        task = (row.geometry.wkb, (scenes, activation_date), crs_wkt, output_dir, fid, damage)
-        logger.debug(f"Task structure: {task}")
+        # Pasamos todas las escenas, la fecha de activación y TARGET_GSD a cada worker
+        task = (row.geometry.wkb, (scenes, activation_date, TARGET_GSD), crs_wkt, output_dir, fid, damage, buffer_meters, tile_size, use_multi_scene)
         tasks.append(task)
 
-    logger.debug(f"Tasks before executor.map: {tasks}")  # Nueva línea para registrar tasks
+    logger.debug(f"Preparados {len(tasks)} tasks para procesamiento")
+    
+    # Log para confirmar que los percentiles están disponibles
+    # if P:
+    #     logger.info(f"Pasando {len(P)} percentiles a {max_workers} workers")
+    # else:
+    #     logger.warning("No hay percentiles disponibles para pasar a los workers")
 
     # Configurar manejador de señales antes del pool
     original_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -1473,16 +2035,54 @@ def process_gpkg(gpkg_path, training_root, output_root, split, max_workers=12, s
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Usar initializer para pasar variables globales a los workers
+        with ProcessPoolExecutor(max_workers=max_workers,
+                                initializer=_init_worker,
+                                initargs=(P, scenes, TARGET_GSD)) as executor:
             try:
-                for meta in tqdm(executor.map(process_tile_worker, tasks, chunksize=128), 
-                               total=len(tasks), 
-                               desc=f"Procesando {gpkg_path.name}"):
-                    if meta:
-                        meta['gpkg'] = gpkg_path.name
-                        meta['event'] = event_name
-                        meta['split'] = split
-                        meta_data.append(meta)
+                processed_count = 0
+                failed_count = 0
+                
+                # Usar submit + as_completed para mejor rendimiento
+                futures = [executor.submit(process_tile_worker, task) for task in tasks]
+                
+                # Procesar futures con barra de progreso para edificios del archivo actual
+                with tqdm(total=len(tasks), desc=f"Edificios {gpkg_path.name}", leave=True) as pbar:
+                    for future in as_completed(futures):
+                        try:
+                            meta = future.result()
+                            if meta:
+                                meta['gpkg'] = gpkg_path.name
+                                meta['event'] = event_name
+                                meta['split'] = split
+                                meta_data.append(meta)
+                                processed_count += 1
+                            else:
+                                failed_count += 1
+                        except Exception as e:
+                            logger.error(f"Error en worker: {e}")
+                            failed_count += 1
+                        
+                        pbar.update(1)
+                
+                # Mostrar resumen al final
+                if failed_count > 0:
+                    logger.warning(f"Resumen {gpkg_path.name}: {processed_count} exitosos, {failed_count} fallidos")
+                else:
+                    logger.info(f"Resumen {gpkg_path.name}: {processed_count} tiles procesados exitosamente")
+                
+                # Contar tiles con problemas de escenas
+                tiles_without_pre = sum(1 for meta in meta_data if meta.get('has_pre', 1) == 0)
+                tiles_without_post = sum(1 for meta in meta_data if meta.get('has_post', 1) == 0)
+                tiles_without_both = sum(1 for meta in meta_data if meta.get('has_pre', 1) == 0 and meta.get('has_post', 1) == 0)
+                
+                if tiles_without_pre > 0 or tiles_without_post > 0:
+                    logger.warning(f"⚠️  Tiles con problemas de cobertura:")
+                    logger.warning(f"   - Sin escena PRE: {tiles_without_pre}")
+                    logger.warning(f"   - Sin escena POST: {tiles_without_post}")
+                    logger.warning(f"   - Sin ambas escenas: {tiles_without_both}")
+                    logger.warning(f"   - Porcentaje con problemas: {((tiles_without_pre + tiles_without_post - tiles_without_both) / len(meta_data) * 100):.1f}%")
+                    
             except KeyboardInterrupt:
                 logger.info("\nInterrupción detectada. Limpiando...")
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -1508,6 +2108,8 @@ def find_fid_column_with_fiona(gpkg_path, gdf):
             logger.info("La columna 'fid' detectada por Fiona se ha asignado al índice como 'id'.")
     return gdf
 
+
+
 def main():
     global P
     parser = argparse.ArgumentParser()
@@ -1519,23 +2121,98 @@ def main():
                        help='Directorio de salida para datos preprocesados')
     parser.add_argument('--tile-size', type=int, default=224, 
                        help='Tamaño de los tiles de salida')
-    parser.add_argument('--buffer-meters', type=int, default=200, 
+    parser.add_argument('--buffer-meters', type=int, default=20, 
                        help='Buffer en metros alrededor de cada edificio')
     parser.add_argument('--max-workers', type=int, default=12, 
                        help='Número máximo de workers para procesamiento paralelo')
-    parser.add_argument('--satellites', type=str, default='wv,ds', 
-                       help='Satélites a usar (separados por coma). Opciones: wv,ds,pleiades,geoeye,ge. Por defecto: wv,ds')
+    parser.add_argument('--satellites', type=str, default='all', 
+                       help='Satélites a usar (separados por coma). Opciones: ' +
+                            'wv (WorldView-2/3), ds/pleiades (Pleiades), bsg (Beijing Space View), ' +
+                            'k3a (Kompsat-3A), gf2 (Gaofen-2), geoeye/ge (GeoEye-1), all (todos). ' +
+                            'Por defecto: wv,ds')
+
+    parser.add_argument('--country', type=str, default=None, 
+                       help='Filtrar y procesar solo escenas de este país. Opciones: Turkey, Myanmar, China, Syria, Morocco, Afghanistan')
+    parser.add_argument('--use-multi-scene', action='store_true', default=True,
+                       help='Usar sistema multi-escena para maximizar cobertura de polígonos. ' +
+                            'Si es True, cada polígono se procesa con la mejor escena que lo cubra. ' +
+                            'Si es False, usa el método tradicional de 1 escena PRE + 1 escena POST por tile.')
+    
+    parser.add_argument('--target-gsd', type=float, default=None,
+                       help='GSD objetivo en metros para el remuestreo. Si no se especifica, ' +
+                            'se determina automáticamente basándose en las escenas disponibles. ' +
+                            'Valores típicos: 0.3-0.5m para WorldView, 1.0m para Pleiades, 2.0m para otros.')
+
     args = parser.parse_args()
-    logger.setLevel(getattr(logging, args.loglevel.upper(), logging.INFO))
+    # Configurar nivel de logging según argumento
+    log_level = getattr(logging, args.loglevel.upper())
+    logger.setLevel(log_level)
     
-    # Mostrar información sobre los satélites seleccionados
+    # Validar satélites seleccionados
     satellites_list = [s.strip().lower() for s in args.satellites.split(',')]
-    logger.info(f"Satélites seleccionados: {satellites_list}")
+    valid_satellites = ['wv', 'ds', 'pleiades', 'bsg', 'k3a', 'gf2', 'geoeye', 'ge', 'all']
+    invalid_satellites = [s for s in satellites_list if s not in valid_satellites]
     
-    # Actualizar variables globales con argumentos
-    global TILE_SIZE, BUFFER_METERS
-    TILE_SIZE = args.tile_size
-    BUFFER_METERS = args.buffer_meters
+    if invalid_satellites:
+        logger.error(f"Satélites inválidos especificados: {invalid_satellites}")
+        logger.error(f"Satélites válidos: {', '.join(valid_satellites)}")
+        return
+    
+    # Mostrar información detallada sobre los satélites seleccionados
+    satellite_info = {
+        'wv': 'WorldView-2/3 (WV02, WV03)',
+        'ds': 'Pleiades (DS_PHR1A, DS_PHR1B)', 
+        'pleiades': 'Pleiades (DS_PHR1A, DS_PHR1B)',
+        'bsg': 'Beijing Space View (BSG-116)',
+        'k3a': 'Kompsat-3A',
+        'gf2': 'Gaofen-2 (GF2_PMS2)',
+        'geoeye': 'GeoEye-1',
+        'ge': 'GeoEye-1',
+        'all': 'Todos los satélites disponibles'
+    }
+    
+    # logger.info(f"Satélites seleccionados: {', '.join(satellites_list)}")
+    # for sat in satellites_list:
+    #     logger.info(f"  • {sat}: {satellite_info.get(sat, 'Satélite no reconocido')}")
+    
+
+    
+    # Mostrar información sobre sistema multi-escena
+    # if args.use_multi_scene:
+    #     logger.info("Sistema multi-escena habilitado: cada polígono se procesa con la mejor escena que lo cubra")
+    # else:
+    #     logger.info("Sistema tradicional: 1 escena PRE + 1 escena POST por tile")
+    
+    # Mostrar información sobre los parámetros configurados
+    # logger.info(f"Tamaño de tile: {args.tile_size}x{args.tile_size} píxeles")
+    # logger.info(f"Buffer alrededor de edificios: {args.buffer_meters} metros")
+    
+    # Mostrar información sobre las mejoras de calidad implementadas
+    # logger.info("✅ Mejoras de calidad implementadas:")
+    # logger.info("  • Remuestreo único directo con rasterio (sin doble interpolación)")
+    # logger.info("  • Resampling adaptativo: AREA para downsample, BILINEAR para upsample")
+    # logger.info("  • TARGET_GSD optimizado para preservar máxima resolución")
+    # logger.info("  • Eliminación de cv2.resize innecesario cuando scale == 1.0")
+    # logger.info("  • Normalización por percentiles por sensor y banda")
+    # logger.info("  • Mejora automática de calidad visual (contraste y brillo)")
+    
+    # Mostrar información sobre las optimizaciones de rendimiento
+    # logger.info("🚀 Optimizaciones de rendimiento implementadas:")
+    # logger.info("  • Cache de datasets de rasterio para evitar aperturas repetidas")
+    # logger.info("  • Rasterización de máscara una sola vez por tile")
+    # logger.info("  • Variables globales pasadas a workers via initializer")
+    # logger.info("  • Threads de BLAS/OpenCV limitados para evitar conflictos")
+    # logger.info("  • Procesamiento con as_completed para mejor paralelismo")
+    # logger.info("  • Sistema multi-escena para maximizar cobertura de polígonos")
+    
+
+    
+    # Mostrar información sobre el procesamiento de bandas
+    # logger.info("📊 Procesamiento de bandas:")
+    # logger.info("  • Priorización de bandas _aligned cuando están disponibles")
+    # logger.info("  • Fallback inteligente a bandas sustitutas (coastal → green → red)")
+    # logger.info("  • Reordenamiento automático a RGB estándar")
+    # logger.info("  • Soporte para múltiples sensores: WorldView, Pleiades, Kompsat, etc.")
     
     output_root = Path(args.output_dir)
     if output_root.exists() and output_root.is_dir():
@@ -1545,24 +2222,44 @@ def main():
     training_data = data_root / "Training"
     output_root.mkdir(exist_ok=True)
     # === CALCULAR PERCENTILES GLOBALES ===
-    logger.info("Calculando percentiles globales por banda...")
-    P = sample_patches_for_percentiles(training_data, sample_size=PERCENTILE_SAMPLE_SIZE)
-    logger.info(f"Percentiles globales: {P}")
+    # logger.info("Calculando percentiles globales por banda y sensor...")
+    P = sample_patches_for_percentiles_per_sensor(training_data, sample_size=PERCENTILE_SAMPLE_SIZE)
+    # logger.info(f"Percentiles calculados para {len(P)} combinaciones sensor-banda")
     gpkg_files = []
     for root, _, files in os.walk(training_annotations):
         for file in files:
             if file.lower().endswith(('training.gpkg', 'testing.gpkg')):
                 gpkg_files.append(Path(root) / file)
-    logger.info(f"Encontrados {len(gpkg_files)} archivos GPKG para procesar")
-    for gpkg in gpkg_files:
-        logger.info(f"  - {gpkg.name}")
+    # logger.info(f"Encontrados {len(gpkg_files)} archivos GPKG para procesar")
+    
+    # Filtrar por país si se especifica
+    if args.country:
+        country_filter = args.country.strip().lower()
+        valid_countries = set([v.lower() for v in EVENT_TO_COUNTRY.values()])
+        if country_filter not in valid_countries:
+            logger.error(f"País '{args.country}' no reconocido. Opciones válidas: {sorted(EVENT_TO_COUNTRY.values())}")
+            return
+        gpkg_files = [gpkg for gpkg in gpkg_files 
+                     if EVENT_TO_COUNTRY.get(gpkg.parent.name, gpkg.parent.name).lower() == country_filter]
+        if not gpkg_files:
+            logger.warning(f"No se encontraron archivos GPKG para el país '{args.country}'")
+            return
+        # logger.info(f"Filtrados {len(gpkg_files)} archivos GPKG para el país '{args.country}'")
+    
+    # for gpkg in gpkg_files:
+    #     logger.info(f"  - {gpkg.name}")
     if args.limit:
         gpkg_files = gpkg_files[:args.limit]
 
-    gpkg_files=gpkg_files[1:3]
+    # gpkg_files=gpkg_files[1:3]
 
     all_meta = []
-    for gpkg_path in gpkg_files:
+    total_processed = 0
+    total_failed = 0
+    
+    # logger.info(f"Procesando {len(gpkg_files)} archivos GPKG...")
+    
+    for i, gpkg_path in enumerate(gpkg_files):
         fname = gpkg_path.name.lower()
         if fname.endswith("training.gpkg"):
             split = 'full'
@@ -1570,8 +2267,19 @@ def main():
             split = 'test'
         else:
             split = 'unknown'
-        meta = process_gpkg(gpkg_path, training_data, output_root, split, args.max_workers, args.satellites)
-        all_meta.extend(meta)
+        
+        # logger.info(f"[{i+1}/{len(gpkg_files)}] Procesando: {gpkg_path.name}")
+        meta = process_gpkg(gpkg_path, training_data, output_root, split, args.buffer_meters, args.max_workers, args.satellites, args.tile_size, args.use_multi_scene, args.target_gsd)
+        
+        if meta:
+            all_meta.extend(meta)
+            total_processed += len(meta)
+            logger.info(f"✅ {gpkg_path.name}: {len(meta)} tiles procesados exitosamente")
+        else:
+            total_failed += 1
+            logger.warning(f"❌ {gpkg_path.name}: No se pudieron procesar tiles")
+    
+    logger.info(f"Resumen final: {total_processed} tiles procesados, {total_failed} archivos fallidos")
     meta_df = pd.DataFrame(
         all_meta,
         columns=[
@@ -1590,5 +2298,7 @@ def main():
     meta_df.to_csv(output_root / "meta.csv", index=False)
     logger.info(f"Procesamiento completo! Guardados {len(all_meta)} tiles")
 
+
+
 if __name__ == "__main__":
-    main()
+    main()  

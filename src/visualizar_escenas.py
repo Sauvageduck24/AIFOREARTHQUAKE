@@ -10,11 +10,254 @@ import os
 from pathlib import Path
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from shapely.geometry import shape, box
 import numpy as np
 from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
+from rasterio.windows import from_bounds
+from rasterio.transform import from_bounds
+
+# === PAN SHARPENING FUNCTIONS ===
+
+def brovey_pansharpening(ms_bands, pan_band, weights=None):
+    """
+    Aplica Brovey pan sharpening.
+    
+    Args:
+        ms_bands: Array (H, W, C) con bandas multiespectrales
+        pan_band: Array (H, W) con banda pancromática
+        weights: Lista de pesos para cada banda MS (opcional)
+    
+    Returns:
+        Array (H, W, C) con bandas multiespectrales pan-sharpened
+    """
+    if weights is None:
+        weights = [1.0] * ms_bands.shape[2]
+    
+    # Normalizar pesos
+    weights = np.array(weights) / np.sum(weights)
+    
+    # Calcular suma ponderada de bandas MS
+    ms_sum = np.zeros_like(pan_band, dtype=np.float32)
+    for i in range(ms_bands.shape[2]):
+        ms_sum += weights[i] * ms_bands[:, :, i]
+    
+    # Evitar división por cero
+    ms_sum = np.where(ms_sum == 0, 1e-8, ms_sum)
+    
+    # Aplicar transformación Brovey
+    sharpened = np.zeros_like(ms_bands, dtype=np.float32)
+    for i in range(ms_bands.shape[2]):
+        sharpened[:, :, i] = (ms_bands[:, :, i] * pan_band) / ms_sum
+    
+    return sharpened
+
+def gram_schmidt_pansharpening(ms_bands, pan_band, method='adaptive'):
+    """
+    Aplica Gram-Schmidt spectral sharpening.
+    
+    Args:
+        ms_bands: Array (H, W, C) con bandas multiespectrales
+        pan_band: Array (H, W) con banda pancromática
+        method: 'adaptive' (recomendado) o 'standard'
+    
+    Returns:
+        Array (H, W, C) con bandas multiespectrales pan-sharpened
+    """
+    if method == 'adaptive':
+        return _gram_schmidt_adaptive(ms_bands, pan_band)
+    else:
+        return _gram_schmidt_standard(ms_bands, pan_band)
+
+def _gram_schmidt_standard(ms_bands, pan_band):
+    """Implementación estándar de Gram-Schmidt."""
+    # Reshape para procesamiento
+    h, w, c = ms_bands.shape
+    ms_reshaped = ms_bands.reshape(h * w, c)
+    pan_reshaped = pan_band.reshape(h * w)
+    
+    # Calcular media de bandas MS
+    ms_mean = np.mean(ms_reshaped, axis=1, keepdims=True)
+    
+    # Primer vector ortogonal (equivalente a la banda pan sintética)
+    u1 = ms_mean.flatten()
+    
+    # Normalizar
+    u1_norm = u1 / (np.linalg.norm(u1) + 1e-8)
+    
+    # Proyectar banda pan en el espacio ortogonal
+    pan_proj = np.dot(pan_reshaped, u1_norm)
+    
+    # Calcular coeficientes de correlación
+    coefficients = np.zeros(c)
+    for i in range(c):
+        band_i = ms_reshaped[:, i]
+        # Proyectar en el espacio ortogonal
+        proj_i = np.dot(band_i, u1_norm)
+        # Calcular coeficiente
+        coefficients[i] = proj_i / (np.linalg.norm(u1_norm) + 1e-8)
+    
+    # Aplicar transformación
+    sharpened = np.zeros_like(ms_reshaped)
+    for i in range(c):
+        sharpened[:, i] = ms_reshaped[:, i] + coefficients[i] * (pan_reshaped - pan_proj)
+    
+    return sharpened.reshape(h, w, c)
+
+def _gram_schmidt_adaptive(ms_bands, pan_band):
+    """
+    Implementación adaptativa de Gram-Schmidt que ajusta los coeficientes
+    basándose en la correlación local entre bandas.
+    """
+    h, w, c = ms_bands.shape
+    
+    # Calcular banda sintética (promedio ponderado de bandas MS)
+    # Usar pesos basados en la respuesta espectral típica de satélites
+    if c >= 4:  # WorldView con bandas costeras
+        weights = [0.1, 0.2, 0.3, 0.4]  # coastal, blue, green, red
+    elif c >= 3:  # RGB
+        weights = [0.2, 0.3, 0.5]  # blue, green, red
+    else:
+        weights = [1.0] * c
+    
+    # Ajustar pesos al número de bandas disponibles
+    weights = weights[:c]
+    weights = np.array(weights) / np.sum(weights)
+    
+    synthetic_pan = np.zeros_like(pan_band, dtype=np.float32)
+    for i in range(c):
+        synthetic_pan += weights[i] * ms_bands[:, :, i]
+    
+    # Calcular coeficientes de correlación local
+    coefficients = np.zeros(c)
+    for i in range(c):
+        # Calcular correlación entre banda MS y banda pan
+        band_i = ms_bands[:, :, i].flatten()
+        pan_flat = pan_band.flatten()
+        
+        # Usar correlación de Pearson
+        corr = np.corrcoef(band_i, pan_flat)[0, 1]
+        if np.isnan(corr):
+            corr = 0.0
+        coefficients[i] = max(0.0, corr)  # Solo correlaciones positivas
+    
+    # Normalizar coeficientes
+    if np.sum(coefficients) > 0:
+        coefficients = coefficients / np.sum(coefficients)
+    
+    # Aplicar transformación Gram-Schmidt
+    sharpened = np.zeros_like(ms_bands, dtype=np.float32)
+    for i in range(c):
+        # Calcular diferencia entre pan real y sintética
+        pan_diff = pan_band - synthetic_pan
+        # Aplicar coeficiente adaptativo
+        sharpened[:, :, i] = ms_bands[:, :, i] + coefficients[i] * pan_diff
+    
+    return sharpened
+
+def ihs_pansharpening(ms_bands, pan_band):
+    """
+    Aplica IHS (Intensity-Hue-Saturation) pan sharpening.
+    
+    Args:
+        ms_bands: Array (H, W, C) con bandas multiespectrales (debe ser RGB)
+        pan_band: Array (H, W) con banda pancromática
+    
+    Returns:
+        Array (H, W, C) con bandas multiespectrales pan-sharpened
+    """
+    if ms_bands.shape[2] != 3:
+        raise ValueError("IHS requiere exactamente 3 bandas (RGB)")
+    
+    # Convertir RGB a IHS
+    r, g, b = ms_bands[:, :, 0], ms_bands[:, :, 1], ms_bands[:, :, 2]
+    
+    # Calcular Intensity
+    intensity = (r + g + b) / 3.0
+    
+    # Calcular Hue y Saturation
+    min_rgb = np.minimum(np.minimum(r, g), b)
+    max_rgb = np.maximum(np.maximum(r, g), b)
+    
+    saturation = np.where(max_rgb > 0, (max_rgb - min_rgb) / max_rgb, 0)
+    
+    # Calcular Hue (simplificado)
+    hue = np.zeros_like(r)
+    delta = max_rgb - min_rgb
+    
+    # Evitar división por cero
+    delta = np.where(delta == 0, 1e-8, delta)
+    
+    # Calcular hue para cada canal
+    hue_r = np.where(max_rgb == r, ((g - b) / delta) % 6, 0)
+    hue_g = np.where(max_rgb == g, (b - r) / delta + 2, 0)
+    hue_b = np.where(max_rgb == b, (r - g) / delta + 4, 0)
+    
+    hue = hue_r + hue_g + hue_b
+    
+    # Reemplazar Intensity con banda pan
+    new_intensity = pan_band
+    
+    # Convertir de vuelta a RGB
+    sharpened = np.zeros_like(ms_bands, dtype=np.float32)
+    
+    # Reconstruir RGB desde IHS
+    for i in range(3):
+        if i == 0:  # Red
+            sharpened[:, :, i] = new_intensity * (1 + saturation * np.cos(hue))
+        elif i == 1:  # Green
+            sharpened[:, :, i] = new_intensity * (1 + saturation * np.cos(hue - 2 * np.pi / 3))
+        else:  # Blue
+            sharpened[:, :, i] = new_intensity * (1 + saturation * np.cos(hue - 4 * np.pi / 3))
+    
+    return np.clip(sharpened, 0, 1)
+
+def apply_pansharpening(ms_bands, pan_band, method='gram_schmidt', **kwargs):
+    """
+    Aplica pan sharpening usando el método especificado.
+    
+    Args:
+        ms_bands: Array (H, W, C) con bandas multiespectrales
+        pan_band: Array (H, W) con banda pancromática
+        method: 'gram_schmidt', 'brovey', 'ihs', o 'none'
+        **kwargs: Parámetros específicos del método
+    
+    Returns:
+        Array (H, W, C) con bandas multiespectrales pan-sharpened
+    """
+    if method == 'none' or pan_band is None:
+        return ms_bands
+    
+    # Validar dimensiones
+    if ms_bands.shape[:2] != pan_band.shape[:2]:
+        logging.warning(f"Dimensiones no coinciden: MS {ms_bands.shape[:2]} vs Pan {pan_band.shape[:2]}")
+        return ms_bands
+    
+    # Normalizar bandas a [0, 1] si es necesario
+    if ms_bands.max() > 1.0:
+        ms_bands = ms_bands.astype(np.float32) / 65535.0
+    if pan_band.max() > 1.0:
+        pan_band = pan_band.astype(np.float32) / 65535.0
+    
+    try:
+        if method == 'gram_schmidt':
+            gs_method = kwargs.get('gram_schmidt_method', 'adaptive')
+            return gram_schmidt_pansharpening(ms_bands, pan_band, method=gs_method)
+        elif method == 'brovey':
+            weights = kwargs.get('weights', None)
+            return brovey_pansharpening(ms_bands, pan_band, weights)
+        elif method == 'ihs':
+            if ms_bands.shape[2] != 3:
+                logging.warning("IHS requiere 3 bandas, usando Gram-Schmidt como fallback")
+                return gram_schmidt_pansharpening(ms_bands, pan_band)
+            return ihs_pansharpening(ms_bands, pan_band)
+        else:
+            logging.warning(f"Método de pan sharpening '{method}' no reconocido, usando Gram-Schmidt")
+            return gram_schmidt_pansharpening(ms_bands, pan_band)
+    except Exception as e:
+        logging.error(f"Error en pan sharpening ({method}): {e}")
+        return ms_bands
 
 def setup_logging():
     Path("outputs").mkdir(exist_ok=True)
@@ -44,70 +287,130 @@ COUNTRY_TO_CRS = {
 }
 
 def _read_rgb_bands_from_separate_files(scene_path, scene_id, out_shape):
-    """Lee las bandas RGB desde archivos TIFF separados usando el JSON del satélite."""
+    """Lee las bandas RGB desde archivos TIFF separados buscando directamente en la carpeta."""
     try:
-        # Buscar el archivo JSON en diferentes ubicaciones posibles
-        json_path = scene_path / f"{scene_id}.json"
-        if not json_path.exists():
-            # Intentar buscar en el directorio padre si no se encuentra
-            json_path = scene_path.parent / f"{scene_id}.json"
-            if not json_path.exists():
-                return None, None
+        # Buscar archivos TIFF directamente en la carpeta de la escena
+        logging.info(f"Buscando archivos TIFF en: {scene_path}")
         
-        logging.info(f"Leyendo JSON desde: {json_path}")
-        with open(json_path, 'r') as f:
-            item_data = json.load(f)
+        # Buscar en la carpeta principal y en Optical_Calibration
+        search_paths = [scene_path]
+        calib_dir = scene_path / "Optical_Calibration"
+        if calib_dir.exists():
+            search_paths.append(calib_dir)
         
-        assets = item_data.get('assets', {})
-        logging.info(f"Assets encontrados en JSON: {list(assets.keys())}")
+        # Encontrar todos los archivos TIFF
+        tiff_files = []
+        for search_path in search_paths:
+            tiff_files.extend(list(search_path.glob("*.tif")))
+            tiff_files.extend(list(search_path.glob("*.tiff")))
+        
+        logging.info(f"Archivos TIFF encontrados: {[f.name for f in tiff_files]}")
+        
+        # Mapear nombres de archivos a bandas RGB
         rgb_assets = {}
+        available_bands = {}
         
-        for key, asset in assets.items():
-            if key in ['red', 'green', 'blue']:
-                rgb_assets[key] = asset
-            elif 'eo:bands' in asset:
-                for band_info in asset['eo:bands']:
-                    common_name = band_info.get('common_name', '').lower()
-                    if common_name in ['red', 'green', 'blue']:
-                        rgb_assets[common_name] = asset
+        # Patrones para identificar bandas (más específicos)
+        band_patterns = {
+            'red': ['r-red.tif', 'r-red_aligned.tif', 'red', 'b4', 'b04', 'band4', 'band_4'],
+            'green': ['r-green.tif', 'r-green_aligned.tif', 'green', 'b3', 'b03', 'band3', 'band_3'],
+            'blue': ['r-coastal.tif', 'r-coastal_aligned.tif', 'r-blue.tif', 'r-blue_aligned.tif', 'blue', 'b2', 'b02', 'band2', 'band_2']
+        }
+        
+        # Primero buscar archivos _aligned (prioridad alta)
+        aligned_files = [f for f in tiff_files if '_aligned' in f.name]
+        logging.info(f"Archivos alineados encontrados: {[f.name for f in aligned_files]}")
+        
+        for tiff_file in aligned_files:
+            file_name_lower = tiff_file.name.lower()
+            
+            for color, patterns in band_patterns.items():
+                if color not in rgb_assets:  # Solo asignar si no se ha asignado ya
+                    for pattern in patterns:
+                        # Usar coincidencia exacta del nombre del archivo para evitar r-red vs r-rededge
+                        if file_name_lower == pattern or file_name_lower.endswith(pattern):
+                            rgb_assets[color] = {'href': str(tiff_file.relative_to(scene_path))}
+                            available_bands[color] = tiff_file
+                            logging.info(f"Banda {color} asignada (alineada): {tiff_file.name}")
+                            break
+                    if color in rgb_assets:
                         break
         
-        # Verificar qué bandas están disponibles
-        available_bands = {}
-        for color in ['red', 'green', 'blue']:
-            if color in rgb_assets:
-                asset = rgb_assets[color]
-                # Construir la ruta relativa desde la carpeta de la escena
-                asset_href = asset['href'].lstrip('./')
-                base_asset_path = scene_path / asset_href
-                
-                # Si la ruta no existe, intentar buscar en diferentes ubicaciones
-                if not base_asset_path.exists():
-                    possible_paths = [
-                        scene_path / "Optical_Calibration" / Path(asset_href).name,
-                        scene_path.parent / "Optical_Calibration" / Path(asset_href).name,
-                        scene_path / Path(asset_href).name,
-                    ]
-                    
-                    for possible_path in possible_paths:
-                        if possible_path.exists():
-                            base_asset_path = possible_path
-                            logging.info(f"Archivo encontrado en ubicación alternativa: {possible_path}")
+        # Luego buscar archivos no alineados (prioridad baja)
+        non_aligned_files = [f for f in tiff_files if '_aligned' not in f.name]
+        logging.info(f"Archivos no alineados encontrados: {[f.name for f in non_aligned_files]}")
+        
+        for tiff_file in non_aligned_files:
+            file_name_lower = tiff_file.name.lower()
+            
+            for color, patterns in band_patterns.items():
+                if color not in rgb_assets:  # Solo asignar si no se ha asignado ya
+                    for pattern in patterns:
+                        # Usar coincidencia exacta del nombre del archivo para evitar r-red vs r-rededge
+                        if file_name_lower == pattern or file_name_lower.endswith(pattern):
+                            rgb_assets[color] = {'href': str(tiff_file.relative_to(scene_path))}
+                            available_bands[color] = tiff_file
+                            logging.info(f"Banda {color} asignada (no alineada): {tiff_file.name}")
                             break
+                    if color in rgb_assets:
+                        break
+        
+        # Si no se encontraron bandas específicas, intentar usar el JSON como fallback
+        if not available_bands:
+            logging.info("No se encontraron bandas específicas, intentando con JSON...")
+            json_path = scene_path / f"{scene_id}.json"
+            if not json_path.exists():
+                json_path = scene_path.parent / f"{scene_id}.json"
+            
+            if json_path.exists():
+                with open(json_path, 'r') as f:
+                    item_data = json.load(f)
                 
-                # Buscar archivo _aligned.tif primero
-                aligned_asset_path = base_asset_path.parent / f"{base_asset_path.stem}_aligned.tif"
+                assets = item_data.get('assets', {})
+                logging.info(f"Assets encontrados en JSON: {list(assets.keys())}")
                 
-                if aligned_asset_path.exists():
-                    available_bands[color] = aligned_asset_path
-                    logging.info(f"Archivo alineado disponible para banda {color}: {aligned_asset_path.name}")
-                elif base_asset_path.exists():
-                    available_bands[color] = base_asset_path
-                    logging.info(f"Archivo original disponible para banda {color}: {base_asset_path.name}")
-                else:
-                    logging.warning(f"No se encontró archivo para banda {color}: {base_asset_path}")
-            else:
-                logging.warning(f"No se encontró asset para banda {color}")
+                for key, asset in assets.items():
+                    if key in ['red', 'green', 'blue']:
+                        rgb_assets[key] = asset
+                    elif 'eo:bands' in asset:
+                        for band_info in asset['eo:bands']:
+                            common_name = band_info.get('common_name', '').lower()
+                            if common_name in ['red', 'green', 'blue']:
+                                rgb_assets[common_name] = asset
+                                break
+                    elif key in ['coastal', 'blue', 'green', 'yellow', 'red', 'rededge', 'nir08', 'nir09']:
+                        if key == 'coastal':
+                            rgb_assets['blue'] = asset
+                        elif key in ['red', 'green', 'blue']:
+                            rgb_assets[key] = asset
+                
+                # Procesar assets del JSON
+                for color in ['red', 'green', 'blue']:
+                    if color in rgb_assets:
+                        asset = rgb_assets[color]
+                        asset_href = asset['href'].lstrip('./')
+                        base_asset_path = scene_path / asset_href
+                        
+                        if not base_asset_path.exists():
+                            possible_paths = [
+                                scene_path / "Optical_Calibration" / Path(asset_href).name,
+                                scene_path.parent / "Optical_Calibration" / Path(asset_href).name,
+                                scene_path / Path(asset_href).name,
+                            ]
+                            
+                            for possible_path in possible_paths:
+                                if possible_path.exists():
+                                    base_asset_path = possible_path
+                                    break
+                        
+                        aligned_asset_path = base_asset_path.parent / f"{base_asset_path.stem}_aligned.tif"
+                        
+                        if aligned_asset_path.exists():
+                            available_bands[color] = aligned_asset_path
+                        elif base_asset_path.exists():
+                            available_bands[color] = base_asset_path
+        
+        logging.info(f"Bandas disponibles después de búsqueda: {list(available_bands.keys())}")
         
         # Si no tenemos al menos una banda, fallar
         if not available_bands:
@@ -129,15 +432,24 @@ def _read_rgb_bands_from_separate_files(scene_path, scene_id, out_shape):
                     logging.info(f"Banda {color} leída exitosamente, forma: {band_data.shape}, rango: [{band_data.min():.2f}, {band_data.max():.2f}]")
                     bands.append(band_data)
             else:
-                # Si falta una banda, usar la primera disponible como sustituto
-                first_available = list(available_bands.keys())[0]
-                asset_path = available_bands[first_available]
-                logging.info(f"Usando banda {first_available} como sustituto para {color} desde: {asset_path}")
+                # Si falta una banda, usar una banda apropiada como sustituto
+                if color == 'blue' and 'green' in available_bands:
+                    # Para banda azul, usar verde como sustituto (mejor que rojo)
+                    substitute_color = 'green'
+                elif color == 'green' and 'red' in available_bands:
+                    # Para banda verde, usar rojo como sustituto
+                    substitute_color = 'red'
+                else:
+                    # Usar la primera banda disponible
+                    substitute_color = list(available_bands.keys())[0]
+                
+                asset_path = available_bands[substitute_color]
+                logging.info(f"Usando banda {substitute_color} como sustituto para {color} desde: {asset_path}")
                 with rasterio.open(asset_path) as src:
                     if transform is None:
                         transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
                     band_data = src.read(1, out_shape=out_shape)
-                    logging.info(f"Banda sustituta {first_available} leída exitosamente, forma: {band_data.shape}")
+                    logging.info(f"Banda sustituta {substitute_color} leída exitosamente, forma: {band_data.shape}")
                     bands.append(band_data)
         
         return np.stack(bands, axis=-1), transform
@@ -186,6 +498,119 @@ def _read_rgb_bands_from_tiff(tiff_path, out_shape):
     except Exception as e:
         logging.error(f"Error leyendo TIFF: {e}")
         return None, None
+
+def _load_pan_band(scene_path, scene_id, out_shape):
+    """
+    Carga la banda pancromática para una escena.
+    
+    Args:
+        scene_path: Path a la carpeta de la escena
+        scene_id: ID de la escena
+        out_shape: Forma de salida (height, width)
+    
+    Returns:
+        Array con la banda pan o None si no se encuentra
+    """
+    try:
+        # Buscar banda pan en la misma carpeta (para Pleiades)
+        calib_dir = scene_path / "Optical_Calibration"
+        if calib_dir.exists():
+            pan_file = calib_dir / "r-pan.tif"
+            aligned_pan_file = calib_dir / "r-pan_aligned.tif"
+            
+            if aligned_pan_file.exists():
+                with rasterio.open(aligned_pan_file) as src:
+                    pan_data = src.read(1, out_shape=out_shape)
+                    logging.info(f"Banda pan alineada cargada: {aligned_pan_file.name}")
+                    return pan_data
+            elif pan_file.exists():
+                with rasterio.open(pan_file) as src:
+                    pan_data = src.read(1, out_shape=out_shape)
+                    logging.info(f"Banda pan cargada: {pan_file.name}")
+                    return pan_data
+        
+        # Para WorldView, buscar en carpeta PN correspondiente
+        if 'WV' in scene_id or 'WorldView' in scene_id:
+            logging.info(f"Buscando banda pan para WorldView: {scene_id}")
+            
+            # Extraer base name para encontrar carpeta PN
+            base_name = scene_id
+            if '_MS' in scene_id:
+                # Extraer la parte común antes de _MS
+                base_name = scene_id.split('_MS')[0]
+                logging.info(f"Base name extraído de MS: {base_name}")
+            elif '_PN' in scene_id:
+                # Si ya es una escena PN, extraer la parte común
+                base_name = scene_id.split('_PN')[0]
+                logging.info(f"Base name extraído de PN: {base_name}")
+            
+            # Buscar carpeta PN correspondiente
+            parent_dir = scene_path.parent
+            logging.info(f"Buscando en directorio padre: {parent_dir}")
+            
+            # Listar todas las carpetas para debug
+            logging.info("Carpetas encontradas en el directorio padre:")
+            for folder in parent_dir.iterdir():
+                if folder.is_dir():
+                    logging.info(f"  - {folder.name}")
+                    if 'PN' in folder.name:
+                        logging.info(f"    (Contiene 'PN')")
+                    if base_name in folder.name:
+                        logging.info(f"    (Contiene base_name '{base_name}')")
+                    if 'PN' in folder.name and base_name in folder.name:
+                        logging.info(f"    ✅ ¡COINCIDENCIA ENCONTRADA!")
+            
+            # Buscar carpeta PN que contenga el base_name
+            for folder in parent_dir.iterdir():
+                if folder.is_dir() and 'PN' in folder.name and base_name in folder.name:
+                    logging.info(f"Encontrada carpeta PN: {folder.name}")
+                    pn_calib_dir = folder / "Optical_Calibration"
+                    if pn_calib_dir.exists():
+                        pan_file = pn_calib_dir / "r-pan.tif"
+                        aligned_pan_file = pn_calib_dir / "r-pan_aligned.tif"
+                        
+                        if aligned_pan_file.exists():
+                            with rasterio.open(aligned_pan_file) as src:
+                                pan_data = src.read(1, out_shape=out_shape)
+                                logging.info(f"Banda pan WorldView alineada cargada: {aligned_pan_file}")
+                                return pan_data
+                        elif pan_file.exists():
+                            with rasterio.open(pan_file) as src:
+                                pan_data = src.read(1, out_shape=out_shape)
+                                logging.info(f"Banda pan WorldView cargada: {pan_file}")
+                                return pan_data
+                        else:
+                            logging.warning(f"No se encontraron archivos pan en: {pn_calib_dir}")
+                    else:
+                        logging.warning(f"No existe directorio de calibración: {pn_calib_dir}")
+            
+            # Si no se encontró con el método anterior, buscar cualquier carpeta PN
+            logging.info("Buscando cualquier carpeta PN disponible...")
+            for folder in parent_dir.iterdir():
+                if folder.is_dir() and 'PN' in folder.name:
+                    logging.info(f"Encontrada carpeta PN alternativa: {folder.name}")
+                    pn_calib_dir = folder / "Optical_Calibration"
+                    if pn_calib_dir.exists():
+                        pan_file = pn_calib_dir / "r-pan.tif"
+                        aligned_pan_file = pn_calib_dir / "r-pan_aligned.tif"
+                        
+                        if aligned_pan_file.exists():
+                            with rasterio.open(aligned_pan_file) as src:
+                                pan_data = src.read(1, out_shape=out_shape)
+                                logging.info(f"Banda pan WorldView alineada cargada (alternativa): {aligned_pan_file}")
+                                return pan_data
+                        elif pan_file.exists():
+                            with rasterio.open(pan_file) as src:
+                                pan_data = src.read(1, out_shape=out_shape)
+                                logging.info(f"Banda pan WorldView cargada (alternativa): {pan_file}")
+                                return pan_data
+        
+        logging.info("No se encontró banda pan para esta escena")
+        return None
+        
+    except Exception as e:
+        logging.error(f"Error cargando banda pan: {e}")
+        return None
 
 def _normalize_for_display(img_array):
     """Normaliza un array para visualización."""
@@ -442,11 +867,20 @@ def find_scenes_for_aoi(aoi_geom, training_root, satellites=None):
             
             # Mapeo de abreviaciones de satélites a patrones de búsqueda
             satellite_patterns = {
-                'wv': ['wv', 'worldview', 'world view'],
-                'ds': ['ds_phr', 'ds-phr', 'pleiades', 'pleiade'],
-                'pleiades': ['pleiades', 'pleiade', 'ds_phr', 'ds-phr'],
-                'geoeye': ['geoeye', 'geo eye', 'ge'],
-                'ge': ['geoeye', 'geo eye', 'ge']
+                'wv': ['wv', 'worldview', 'world view', 'wv02', 'wv03'],
+                'ds': ['ds_phr', 'ds-phr', 'pleiades', 'pleiade', 'ds_phr1a', 'ds_phr1b'],
+                'pleiades': ['pleiades', 'pleiade', 'ds_phr', 'ds-phr', 'ds_phr1a', 'ds_phr1b'],
+                'bsg': ['bsg', 'beijing space view', 'bsg-116'],
+                'k3a': ['k3a', 'kompsat', 'kompsat-3a', 'kompsat3a'],
+                'gf2': ['gf2', 'gaofen', 'gaofen-2', 'gaofen2', 'gf2_pms2', 'gf2-pms2'],
+                'geoeye': ['geoeye', 'geo eye', 'ge', 'geoeye-1', 'geoeye1'],
+                'ge': ['geoeye', 'geo eye', 'ge', 'geoeye-1', 'geoeye1'],
+                'all': ['wv', 'worldview', 'world view', 'wv02', 'wv03',
+                        'ds_phr', 'ds-phr', 'pleiades', 'pleiade', 'ds_phr1a', 'ds_phr1b',
+                        'bsg', 'beijing space view', 'bsg-116',
+                        'k3a', 'kompsat', 'kompsat-3a', 'kompsat3a',
+                        'gf2', 'gaofen', 'gaofen-2', 'gaofen2', 'gf2_pms2', 'gf2-pms2',
+                        'geoeye', 'geo eye', 'ge', 'geoeye-1', 'geoeye1']
             }
             
             # Verificar si la escena corresponde a alguno de los satélites solicitados
@@ -456,13 +890,13 @@ def find_scenes_for_aoi(aoi_geom, training_root, satellites=None):
                 for pattern in patterns:
                     if pattern in scene_id_lower or pattern in platform:
                         satellite_match = True
-                        logging.info(f"Escena {scene_id} coincide con satélite '{satellite}' (patrón: {pattern})")
+                        logging.debug(f"Escena {scene_id} coincide con satélite '{satellite}' (patrón: {pattern})")
                         break
                 if satellite_match:
                     break
             
             if not satellite_match:
-                logging.info(f"Escena {scene_id} descartada - no coincide con satélites solicitados: {satellites}")
+                logging.debug(f"Escena {scene_id} descartada - no coincide con satélites solicitados: {satellites}")
                 continue
 
             logging.info(f"Procesando escena: {scene_id} (Fecha: {scene_date}, Plataforma: {platform})")
@@ -577,7 +1011,6 @@ def find_scenes_for_aoi(aoi_geom, training_root, satellites=None):
                     # Si el CRS no es WGS84, reprojectar la geometría
                     if src.crs and src.crs != 'EPSG:4326':
                         try:
-                            from pyproj import Transformer
                             transformer = Transformer.from_crs(src.crs, 'EPSG:4326', always_xy=True)
                             scene_geom = shapely_transform(transformer.transform, scene_geom)
                         except Exception as e:
@@ -696,7 +1129,7 @@ def calculate_buffer_meters(scene_id, gsd=None, user_buffer=None):
     else:
         return 60.0
 
-def visualize_scene_with_polygons(scene, gpkg_path, layer_name, country, city=None, show_polygons=True, filter_outside_polygons=True):
+def visualize_scene_with_polygons(scene, gpkg_path, layer_name, country, city=None, show_polygons=True, filter_outside_polygons=True, pansharp_method='none'):
     """Visualiza una escena con polígonos superpuestos."""
     try:
         gdf = gpd.read_file(gpkg_path, layer=layer_name)
@@ -721,32 +1154,53 @@ def visualize_scene_with_polygons(scene, gpkg_path, layer_name, country, city=No
                     logging.error(f"Error reproyectando GPKG: {e}")
                     return
 
-            has_rotation = not (abs(src.transform.b) < 1e-9 and abs(src.transform.d) < 1e-9)
-
-            if has_rotation:
-                img = src.read(1, out_shape=(src.height // 4, src.width // 4))
-                img_transform = src.transform * src.transform.scale(src.width / (src.width // 4), src.height / (src.height // 4))
-                img = _normalize_for_display(img)
-            else:
-                scale_factor = 4
-                out_shape = (src.height // scale_factor, src.width // scale_factor)
-                
-                img, img_transform = _read_rgb_bands_from_separate_files(scene['path'], scene['scene_id'], out_shape)
-                
-                if img is None:
-                    img, img_transform = _read_rgb_bands_from_tiff(scene['overview_path'], out_shape)
-
-                if img is None:
-                    num_bands = min(3, src.count)
-                    data = src.read(list(range(1, num_bands + 1)), out_shape=out_shape)
-                    img = np.moveaxis(data, 0, -1)
-                    img_transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
-
-                img = _normalize_for_display(img)
+            scale_factor = 4
+            out_shape = (src.height // scale_factor, src.width // scale_factor)
             
-            # Usar los bounds ya extraídos del TIFF
-            left, bottom, right, top = img_bounds.left, img_bounds.bottom, img_bounds.right, img_bounds.top
+            # Cargar bandas RGB
+            img, img_transform = _read_rgb_bands_from_separate_files(scene['path'], scene['scene_id'], out_shape)
+            
+            if img is None:
+                img, img_transform = _read_rgb_bands_from_tiff(scene['overview_path'], out_shape)
+
+            if img is None:
+                num_bands = min(3, src.count)
+                data = src.read(list(range(1, num_bands + 1)), out_shape=out_shape)
+                img = np.moveaxis(data, 0, -1)
+                img_transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+
+            img = _normalize_for_display(img)
+                
+            # Aplicar pan sharpening si está habilitado
+            if pansharp_method != 'none':
+                pan_band = _load_pan_band(scene['path'], scene['scene_id'], out_shape)
+                if pan_band is not None:
+                    logging.info(f"Aplicando pan sharpening: {pansharp_method}")
+                    try:
+                        # Normalizar banda pan para pan sharpening
+                        pan_band_norm = pan_band.astype(np.float32)
+                        if pan_band_norm.max() > 1.0:
+                            pan_band_norm = pan_band_norm / pan_band_norm.max()
+                        
+                        # Aplicar pan sharpening
+                        img = apply_pansharpening(img, pan_band_norm, method=pansharp_method)
+                        logging.info(f"Pan sharpening aplicado exitosamente")
+                    except Exception as e:
+                        logging.warning(f"Error en pan sharpening: {e}, usando imagen original")
+                else:
+                    logging.info(f"Pan sharpening solicitado pero no hay banda pan disponible")
+            
+            # Calcular los bounds correctos para la imagen redimensionada
+            # SIEMPRE usar el CRS y bounds del overview original para mantener consistencia con polígonos
+            height, width = img.shape[:2]
+            
+            # Usar el transform del overview original escalado para la imagen redimensionada
+            overview_transform_scaled = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+            bounds = rasterio.transform.array_bounds(height, width, overview_transform_scaled)
+            left, bottom, right, top = bounds
+            
             logging.info(f"Bounds de visualización - Left: {left}, Bottom: {bottom}, Right: {right}, Top: {top}")
+            logging.info(f"Transform de imagen: {img_transform}")
             
             logging.info(f"Creando figura matplotlib con imagen de forma: {img.shape}")
             fig, ax = plt.subplots(figsize=(12, 8))
@@ -776,11 +1230,14 @@ def visualize_scene_with_polygons(scene, gpkg_path, layer_name, country, city=No
                     gdf_clean.geometry = gdf_clean.geometry.buffer(auto_buffer)
             
             if show_polygons and not gdf_clean.empty and filter_outside_polygons:
-                from shapely.geometry import box
                 img_bbox = box(left, bottom, right, top)
+                logging.info(f"Filtrando polígonos por bounds de imagen: {img_bbox.bounds}")
+                logging.info(f"Polígonos antes del filtrado: {len(gdf_clean)}")
                 gdf_clean = gdf_clean[gdf_clean.geometry.intersects(img_bbox)]
+                logging.info(f"Polígonos después del filtrado: {len(gdf_clean)}")
                 
                 if gdf_clean.empty:
+                    logging.warning("No quedaron polígonos después del filtrado por bounds")
                     show_polygons = False
             
             if show_polygons:
@@ -803,10 +1260,13 @@ def visualize_scene_with_polygons(scene, gpkg_path, layer_name, country, city=No
                         continue
                 
                 if patches:
+                    logging.info(f"Mostrando {len(patches)} polígonos en la imagen")
                     ax.add_collection(PatchCollection(patches, match_original=True))
                     for idx, c in enumerate(centroids):
                         ax.plot(c.x, c.y, 'o', color='red', markersize=8)
                         ax.text(c.x, c.y, str(idx+1), color='yellow', fontsize=8, fontweight='bold', ha='center', va='center')
+                else:
+                    logging.warning("No se crearon patches para mostrar polígonos")
             else:
                 ax.text(0.5, 0.95, 'ESCENA PRE-TERREMOTO\nLos polígonos de daños no deberían aparecer aquí', 
                        transform=ax.transAxes, fontsize=14, ha='center', va='top',
@@ -853,7 +1313,7 @@ def visualize_scene_with_polygons(scene, gpkg_path, layer_name, country, city=No
     except Exception as e:
         logging.error(f"Error visualizando escena {scene['scene_id']}: {e}")
 
-def visualize_pre_post_scenes_with_polygons(pre_scene, post_scene, gpkg_path, layer_name, country, city=None, show_polygons=True, filter_outside_polygons=True):
+def visualize_pre_post_scenes_with_polygons(pre_scene, post_scene, gpkg_path, layer_name, country, city=None, show_polygons=True, filter_outside_polygons=True, pansharp_method='none'):
     """Visualiza lado a lado la escena pre y post-terremoto con los polígonos superpuestos."""
     gdf = gpd.read_file(gpkg_path, layer=layer_name)
     gdf_clean = clean_and_validate_geometries(gdf)
@@ -884,29 +1344,53 @@ def visualize_pre_post_scenes_with_polygons(pre_scene, post_scene, gpkg_path, la
                     logging.error(f"Error reproyectando GPKG: {e}")
                     return
                     
-            has_rotation = not (abs(src.transform.b) < 1e-9 and abs(src.transform.d) < 1e-9)
-            if has_rotation:
-                img = src.read(1, out_shape=(src.height // scale_factor, src.width // scale_factor))
-                img = _normalize_for_display(img)
-                img_bounds = src.bounds
-            else:
-                out_shape = (src.height // scale_factor, src.width // scale_factor)
+            # Cargar imagen con el mismo enfoque que la función individual
+            out_shape = (src.height // scale_factor, src.width // scale_factor)
+            
+            img, img_transform = _read_rgb_bands_from_separate_files(scene['path'], scene['scene_id'], out_shape)
+            
+            if img is None:
+                img, img_transform = _read_rgb_bands_from_tiff(scene['overview_path'], out_shape)
+            
+            if img is None:
+                num_bands = min(3, src.count)
+                data = src.read(list(range(1, num_bands + 1)), out_shape=out_shape)
+                img = np.moveaxis(data, 0, -1)
+                img_transform = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+            
+            img = _normalize_for_display(img)
                 
-                img, _ = _read_rgb_bands_from_separate_files(scene['path'], scene['scene_id'], out_shape)
-                
-                if img is None:
-                    img, _ = _read_rgb_bands_from_tiff(scene['overview_path'], out_shape)
-                
-                if img is None:
-                    num_bands = min(3, src.count)
-                    data = src.read(list(range(1, num_bands + 1)), out_shape=out_shape)
-                    img = np.moveaxis(data, 0, -1)
-                
-                img = _normalize_for_display(img)
-                
+            # Aplicar pan sharpening si está habilitado
+            if pansharp_method != 'none':
+                pan_band = _load_pan_band(scene['path'], scene['scene_id'], out_shape)
+                if pan_band is not None:
+                    logging.info(f"Aplicando pan sharpening a escena {idx}: {pansharp_method}")
+                    try:
+                        # Normalizar banda pan para pan sharpening
+                        pan_band_norm = pan_band.astype(np.float32)
+                        if pan_band_norm.max() > 1.0:
+                            pan_band_norm = pan_band_norm / pan_band_norm.max()
+                        
+                        # Aplicar pan sharpening
+                        img = apply_pansharpening(img, pan_band_norm, method=pansharp_method)
+                        logging.info(f"Pan sharpening aplicado exitosamente a escena {idx}")
+                    except Exception as e:
+                        logging.warning(f"Error en pan sharpening para escena {idx}: {e}, usando imagen original")
+                else:
+                    logging.info(f"Pan sharpening solicitado pero no hay banda pan disponible para escena {idx}")
+            
             imgs.append(img)
-            # Usar los bounds ya extraídos del TIFF
-            img_extents.append((img_bounds.left, img_bounds.right, img_bounds.bottom, img_bounds.top))
+            
+            # Calcular los bounds correctos para la imagen redimensionada
+            # SIEMPRE usar el CRS y bounds del overview original para mantener consistencia con polígonos
+            height, width = img.shape[:2]
+            
+            # Usar el transform del overview original escalado para la imagen redimensionada
+            overview_transform_scaled = src.transform * src.transform.scale(src.width / out_shape[1], src.height / out_shape[0])
+            bounds = rasterio.transform.array_bounds(height, width, overview_transform_scaled)
+            left, bottom, right, top = bounds
+            
+            img_extents.append((left, right, bottom, top))
             gdfs.append(gdf_proj)
             
     fig, axes = plt.subplots(1, 2, figsize=(20, 10))
@@ -938,9 +1422,11 @@ def visualize_pre_post_scenes_with_polygons(pre_scene, post_scene, gpkg_path, la
                 gdf_show.geometry = gdf_show.geometry.buffer(auto_buffer)
                 
         if show_polygons and not gdf_show.empty and filter_outside_polygons:
-            from shapely.geometry import box
             img_bbox = box(left, bottom, right, top)
+            logging.info(f"Escena {idx}: Filtrando polígonos por bounds de imagen: {img_bbox.bounds}")
+            logging.info(f"Escena {idx}: Polígonos antes del filtrado: {len(gdf_show)}")
             gdf_show = gdf_show[gdf_show.geometry.intersects(img_bbox)]
+            logging.info(f"Escena {idx}: Polígonos después del filtrado: {len(gdf_show)}")
             
         shown = 0
         for geom in gdf_show.geometry:
@@ -962,9 +1448,12 @@ def visualize_pre_post_scenes_with_polygons(pre_scene, post_scene, gpkg_path, la
                 continue
                 
         if patches:
+            logging.info(f"Escena {idx}: Mostrando {len(patches)} polígonos en la imagen")
             ax.add_collection(PatchCollection(patches, match_original=True))
             for idx2, c in enumerate(centroids):
                 ax.plot(c.x, c.y, 'o', color='red', markersize=8)
+        else:
+            logging.warning(f"Escena {idx}: No se crearon patches para mostrar polígonos")
                 
         date_str = scenes[idx]['date'].strftime('%Y-%m-%d %H:%M') if scenes[idx]['date'] else 'Fecha desconocida'
         img_epsg = img_crss[idx].to_epsg() if img_crss[idx] else 'No definido'
@@ -983,12 +1472,61 @@ def main():
     parser.add_argument('--country', type=str, default=None, help='Filtrar y procesar solo escenas de este país.')
     parser.add_argument('--filter-outside-polygons', action='store_true', default=True, help='Filtrar polígonos que caen fuera de los límites de la imagen.')
     parser.add_argument('--all-scenes', action='store_true', help='Mostrar todas las escenas disponibles para el país, no solo las que intersectan con el GPKG.')
-    parser.add_argument('--satellites', type=str, default='wv,ds', help='Satélites a usar (separados por coma). Opciones: wv,ds,pleiades,geoeye,ge. Por defecto: wv,ds')
+    parser.add_argument('--satellites', type=str, default='all', 
+                       help='Satélites a usar (separados por coma). Opciones: ' +
+                            'wv (WorldView-2/3), ds/pleiades (Pleiades), bsg (Beijing Space View), ' +
+                            'k3a (Kompsat-3A), gf2 (Gaofen-2), geoeye/ge (GeoEye-1), all (todos). ' +
+                            'Por defecto: wv,ds')
+    
+    # Argumentos para pan sharpening
+    parser.add_argument('--pansharp-method', type=str, default='gram_schmidt',
+                       choices=['none', 'gram_schmidt', 'brovey', 'ihs'],
+                       help='Método de pan sharpening a usar. Opciones: none, gram_schmidt (recomendado), brovey, ihs')
+    parser.add_argument('--pansharp-gram-schmidt-method', type=str, default='adaptive',
+                       choices=['adaptive', 'standard'],
+                       help='Método de Gram-Schmidt: adaptive (recomendado) o standard')
+    parser.add_argument('--pansharp-brovey-weights', type=str, default=None,
+                       help='Pesos para Brovey (formato: "0.2,0.3,0.5" para RGB)')
+    
     args = parser.parse_args()
 
-    # Mostrar información sobre los satélites seleccionados
+    # Validar satélites seleccionados
     satellites_list = [s.strip().lower() for s in args.satellites.split(',')]
+    valid_satellites = ['wv', 'ds', 'pleiades', 'bsg', 'k3a', 'gf2', 'geoeye', 'ge', 'all']
+    invalid_satellites = [s for s in satellites_list if s not in valid_satellites]
+    
+    if invalid_satellites:
+        logging.error(f"Satélites inválidos especificados: {invalid_satellites}")
+        logging.error(f"Satélites válidos: {', '.join(valid_satellites)}")
+        return
+    
+    # Mostrar información detallada sobre los satélites seleccionados
+    satellite_info = {
+        'wv': 'WorldView-2/3 (WV02, WV03)',
+        'ds': 'Pleiades (DS_PHR1A, DS_PHR1B)', 
+        'pleiades': 'Pleiades (DS_PHR1A, DS_PHR1B)',
+        'bsg': 'Beijing Space View (BSG-116)',
+        'k3a': 'Kompsat-3A',
+        'gf2': 'Gaofen-2 (GF2_PMS2)',
+        'geoeye': 'GeoEye-1',
+        'ge': 'GeoEye-1',
+        'all': 'Todos los satélites disponibles'
+    }
+    
     logging.info(f"Satélites seleccionados: {satellites_list}")
+    for sat in satellites_list:
+        logging.info(f"  • {sat}: {satellite_info.get(sat, 'Satélite no reconocido')}")
+    
+    # Mostrar información sobre pan sharpening
+    logging.info(f"Método de pan sharpening: {args.pansharp_method}")
+    if args.pansharp_method != 'none':
+        if args.pansharp_method == 'gram_schmidt':
+            logging.info(f"  - Gram-Schmidt method: {args.pansharp_gram_schmidt_method}")
+        elif args.pansharp_method == 'brovey':
+            if args.pansharp_brovey_weights:
+                logging.info(f"  - Brovey weights: {args.pansharp_brovey_weights}")
+            else:
+                logging.info(f"  - Brovey weights: automático")
     
     gpkg_files = find_all_gpkg_files(args.data_root)
     logging.info(f"Encontrados {len(gpkg_files)} archivos GPKG")
@@ -1055,15 +1593,59 @@ def main():
         logging.info(f"Escenas encontradas: {len(scenes)}")
         
         if len(scenes) >= 2:
-            scenes_sorted = sorted([s for s in scenes if s['date']], key=lambda s: s['date'])
-            if len(scenes_sorted) >= 2:
-                pre_scene, post_scene = scenes_sorted[0], scenes_sorted[-1]
-                if pre_scene['scene_id'] != post_scene['scene_id']:
+            # Obtener la fecha del terremoto para este país
+            earthquake_dates = extract_earthquake_dates_from_collection(event_dir / "collection.json")
+            earthquake_date = earthquake_dates.get(country)
+            
+            if earthquake_date:
+                # Separar escenas en pre y post terremoto basándose en la fecha real del terremoto
+                pre_scenes = []
+                post_scenes = []
+                
+                for scene in scenes:
+                    if scene['date']:
+                        if scene['date'].tzinfo is None:
+                            scene['date'] = scene['date'].replace(tzinfo=timezone.utc)
+                        
+                        if earthquake_date.tzinfo is None:
+                            earthquake_date = earthquake_date.replace(tzinfo=timezone.utc)
+                        
+                        if scene['date'] < earthquake_date:
+                            pre_scenes.append(scene)
+                        else:
+                            post_scenes.append(scene)
+                
+                # Seleccionar la escena pre más cercana al terremoto y la post más cercana al terremoto
+                pre_scene = None
+                post_scene = None
+                
+                if pre_scenes:
+                    pre_scene = min(pre_scenes, key=lambda s: abs(s['date'] - earthquake_date))
+                    logging.info(f"Escena PRE seleccionada: {pre_scene['scene_id']} (fecha: {pre_scene['date'].strftime('%Y-%m-%d')})")
+                
+                if post_scenes:
+                    post_scene = min(post_scenes, key=lambda s: abs(s['date'] - earthquake_date))
+                    logging.info(f"Escena POST seleccionada: {post_scene['scene_id']} (fecha: {post_scene['date'].strftime('%Y-%m-%d')})")
+                
+                if pre_scene and post_scene and pre_scene['scene_id'] != post_scene['scene_id']:
                     city = extract_city_from_gpkg(gpkg_path)
                     logging.info(f"Visualizando pre y post-terremoto lado a lado: {pre_scene['scene_id']} vs {post_scene['scene_id']}")
                     visualize_pre_post_scenes_with_polygons(pre_scene, post_scene, gpkg_path, layer_name, country, city, 
-                                                          show_polygons=True, filter_outside_polygons=args.filter_outside_polygons)
+                                                          show_polygons=True, filter_outside_polygons=args.filter_outside_polygons,
+                                                          pansharp_method=args.pansharp_method)
                     continue
+            else:
+                # Fallback: usar la lógica anterior si no se puede determinar la fecha del terremoto
+                scenes_sorted = sorted([s for s in scenes if s['date']], key=lambda s: s['date'])
+                if len(scenes_sorted) >= 2:
+                    pre_scene, post_scene = scenes_sorted[0], scenes_sorted[-1]
+                    if pre_scene['scene_id'] != post_scene['scene_id']:
+                        city = extract_city_from_gpkg(gpkg_path)
+                        logging.info(f"Visualizando pre y post-terremoto lado a lado (fallback): {pre_scene['scene_id']} vs {post_scene['scene_id']}")
+                        visualize_pre_post_scenes_with_polygons(pre_scene, post_scene, gpkg_path, layer_name, country, city, 
+                                                              show_polygons=True, filter_outside_polygons=args.filter_outside_polygons,
+                                                              pansharp_method=args.pansharp_method)
+                        continue
         
         for scene in scenes:
             logging.info(f"Visualizando escena: {scene['scene_id']}")
@@ -1087,7 +1669,8 @@ def main():
             
             logging.info(f"Visualizando escena {status}: {scene['scene_id']}")
             visualize_scene_with_polygons(scene, gpkg_path, layer_name, country, city, 
-                                        show_polygons=show_polygons, filter_outside_polygons=args.filter_outside_polygons)
+                                        show_polygons=show_polygons, filter_outside_polygons=args.filter_outside_polygons,
+                                        pansharp_method=args.pansharp_method)
         
         logging.info(f"Completado GPKG: {gpkg_path.name}")
 
