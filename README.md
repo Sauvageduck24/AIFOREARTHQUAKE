@@ -295,6 +295,43 @@ El siguiente diagrama ilustra el proceso de alineación geográfica:
 
 ---
 
+### 🔍 Proceso de Georreferenciación
+
+El siguiente diagrama ilustra el proceso de alineación geográfica:
+
+![Proceso de georreferenciación](data/imgs/georeferencicion.png)
+
+---
+
+## 🛰️ Uso de QGIS para Georreferenciación y Pansharpening
+
+Durante el desarrollo del proyecto, se exploraron varias herramientas para el procesamiento inicial de imágenes satelitales, incluyendo scripts en Python utilizando `rasterio`, `gdal`, y `opencv`. Sin embargo, estas aproximaciones presentaron varios retos:
+
+- ❌ **Desalineación persistente** entre capas pre y post-terremoto.
+- ❌ **Errores en la fusión pansharpening** con scripts automatizados (especialmente al manipular imágenes multiespectrales de alta resolución).
+- ❌ **Problemas de proyección y referencia espacial** no resueltos correctamente desde código.
+
+### ✅ QGIS como Solución Integral
+
+Ante estos problemas, se optó por utilizar **QGIS** como herramienta principal para la etapa de preprocesamiento geoespacial debido a sus ventajas:
+
+- 🗺️ **Georreferenciación precisa** usando herramientas gráficas de control de puntos y ajuste por transformación.
+- 🎨 **Pansharpening supervisado visualmente**, con plugins como *Orfeo Toolbox* o herramientas nativas.
+- 🧩 **Reproyección masiva** y conversión entre formatos con mayor estabilidad.
+- 🧭 Compatibilidad directa con archivos `.gpkg`, `.tif` y `.vrt`.
+
+Este enfoque híbrido (preprocesamiento en QGIS + pipeline IA en Python) permitió **aumentar significativamente la calidad del dataset final**, asegurando una alineación espacial precisa que es crítica para modelos de segmentación semántica multitemporal.
+
+### 🖼️ Ejemplo del Flujo en QGIS
+
+1. **Cargar imágenes pre y post** en QGIS.
+2. **Corregir desplazamientos** con georreferenciación manual.
+3. **Aplicar pansharpening** utilizando herramientas espectrales.
+4. **Exportar imágenes alineadas** a GeoTIFF.
+5. **Integrar resultados al pipeline de `preprocess.py`** mediante archivos `.npz` generados a partir de estas salidas.
+
+---
+
 ## 🏗️ Entrenamiento de Modelos
 
 ### 🎯 Configuraciones Disponibles
@@ -760,37 +797,8 @@ Este proyecto está bajo la **Licencia MIT**. Ver [LICENSE](LICENSE) para más d
 
 ---
 
-## 👥 Autores
-
-El equipo **MM** está formado por investigadores apasionados en el campo de la IA aplicada a la respuesta humanitaria:
-
-### 👨‍💻 **Esteban Sánchez Gámez**
-- **Especialización**: Deep Learning, Computer Vision
-- **Experiencia**: 5+ años en IA aplicada
-- **Contribuciones**: Arquitectura de modelos, pipeline de entrenamiento
-
-### 👨‍💻 **Pablo Delgado Muñoz**
-- **Especialización**: Machine Learning, Data Science
-- **Experiencia**: 4+ años en procesamiento de datos geoespaciales
-- **Contribuciones**: Preprocesamiento de datos, análisis de resultados
-
 ### 🎯 **Objetivo del Equipo**
 Desarrollar soluciones de IA que puedan **salvar vidas** y **acelerar la respuesta humanitaria** tras desastres naturales, contribuyendo a un mundo más resiliente y preparado.
-
----
-
-## 📞 Contacto
-
-### 💬 Comunicación
-- **Issues**: [GitHub Issues](https://github.com/your-repo/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-repo/discussions)
-- **Email**: earthquake-ai@example.com
-
-### 📊 Estado del Proyecto
-- **Versión**: 1.0.0
-- **Última Actualización**: Diciembre 2024
-- **Estado**: Activo en desarrollo
-- **Licencia**: MIT
 
 ---
 
