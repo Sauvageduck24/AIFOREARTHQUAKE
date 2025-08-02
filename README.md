@@ -649,25 +649,6 @@ python src/test.py --ensemble --model_paths outputs/models/
 - **False Positive Rate**: Tasa de falsos positivos
 - **Regional Performance**: Rendimiento por región geográfica
 
-### 📈 Evaluación Comparativa
-
-#### **Comparación con Baselines**
-| Método | IoU | F1-Score | Tiempo (s/tile) |
-|--------|-----|----------|-----------------|
-| **Random Forest** | 0.45 | 0.62 | 0.1 |
-| **U-Net (Baseline)** | 0.72 | 0.84 | 0.05 |
-| **ResNet-50 + UNet** | 0.78 | 0.88 | 0.08 |
-| **Transformer** | 0.75 | 0.86 | 0.12 |
-| **Ensemble (Ours)** | **0.81** | **0.90** | 0.15 |
-
-#### **Análisis de Errores**
-- **Falsos Positivos**: Edificios clasificados como dañados cuando no lo están
-- **Falsos Negativos**: Edificios dañados no detectados
-- **Errores de Borde**: Problemas en los límites de edificios
-- **Errores de Escala**: Problemas con edificios de diferentes tamaños
-
----
-
 ## 🛠️ Características Técnicas
 
 ### ✅ Funcionalidades Implementadas
@@ -803,5 +784,3 @@ Desarrollar soluciones de IA que puedan **salvar vidas** y **acelerar la respues
 ---
 
 **⚠️ Nota Importante**: Este proyecto es parte de la competición [AI for Earthquake Response](https://platform.ai4eo.eu/ai-for-earthquake-response). Los datos están sujetos a restricciones de acceso y deben ser solicitados manualmente al equipo organizador.
-
-**🌟 ¡Gracias por tu interés en hacer del mundo un lugar más seguro!** 
