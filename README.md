@@ -1,786 +1,153 @@
-# 🌍 AI for Earthquake Response - Deep Learning Project
+**English** | [Español](README.es.md)
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Competition](https://img.shields.io/badge/Competition-AI4EO%20Earthquake%20Response-orange.svg)](https://platform.ai4eo.eu/ai-for-earthquake-response)
+# AI for Earthquake Response
 
-> **Sistema de detección automática de daños en edificios tras terremotos utilizando imágenes satelitales multitemporales de alta resolución**
+Our solution for the [AI for Earthquake Response](https://platform.ai4eo.eu/ai-for-earthquake-response) competition by ESA Phi-lab and the International Charter "Space and Major Disasters".
 
----
+The challenge: given high resolution satellite images from before and after an earthquake and the building polygons of the area, say which buildings are damaged (1) and which are not (0). The idea behind it is being able to generate damage maps quickly after an earthquake so rescue teams know where to go first.
 
-## 📋 Tabla de Contenidos
+The data covers earthquakes in Turkey (Adiyaman, Antakya, Marash), Syria, China, Morocco, Myanmar and Afghanistan, with images from different satellites (WorldView, Pléiades...), each one with its own resolution and bands.
 
-- [🏆 Competición](#-competición)
-- [🎯 Objetivo](#-objetivo)
-- [🔬 Metodología](#-metodología)
-- [📁 Arquitectura del Proyecto](#-arquitectura-del-proyecto)
-- [🚀 Instalación y Configuración](#-instalación-y-configuración)
-- [📊 Preparación de Datos](#-preparación-de-datos)
-- [🏗️ Entrenamiento de Modelos](#️-entrenamiento-de-modelos)
-- [🔍 Evaluación y Predicción](#-evaluación-y-predicción)
-- [📈 Resultados y Visualizaciones](#-resultados-y-visualizaciones)
-- [⚙️ Configuración Avanzada](#️-configuración-avanzada)
-- [🧪 Experimentos y Análisis](#-experimentos-y-análisis)
-- [📊 Métricas y Evaluación](#-métricas-y-evaluación)
-- [🛠️ Características Técnicas](#️-características-técnicas)
-- [🤝 Contribución](#-contribución)
-- [📄 Licencia](#-licencia)
-- [🙏 Agradecimientos](#-agradecimientos)
-- [👥 Autores](#-autores)
+## Approach
 
----
+1. **Preprocessing**: for each building we look for the best pre and post event scene, crop a tile centred on the building (224 px by default, with a 20 m margin around it) and save it as `.npz` together with its label.
+2. **Siamese model**: the same backbone processes the before and after tiles, and a head compares both representations to decide whether there is damage.
+3. **Inference**: the trained model labels the buildings in the test `.gpkg` files and generates the submission files per city.
 
-## 🏆 Competición
+![Project structure](data/imgs/estructura.jpg)
 
-Este proyecto participa en la competición **[AI for Earthquake Response](https://platform.ai4eo.eu/ai-for-earthquake-response)** organizada por **ESA Φ-lab** y el **International Charter 'Space and Major Disasters'**.
+## Data
 
-### 🎖️ Contexto de la Competición
+The data is not in the repo, you have to request it:
 
-La competición busca desarrollar soluciones de IA que puedan:
-- **Acelerar la respuesta humanitaria** tras terremotos
-- **Automatizar la detección de daños** en edificios
-- **Generar mapas de daños** en tiempo real
-- **Mejorar la eficiencia** de las operaciones de rescate
+1. Sign up on the [AI4EO platform](https://platform.ai4eo.eu/ai-for-earthquake-response).
+2. Create an account on [EOTDL](https://www.eotdl.com) with the same email.
+3. Wait for access (it can take up to 48 h) and download the dataset into `data/international-charter-eo4ai-etq-challenge/`.
 
-### 🏅 Criterios de Evaluación
+![Dataset structure](data/imgs/dataset.jpg)
 
-- **Precisión**: IoU, F1-Score, Precision-Recall
-- **Velocidad**: Tiempo de procesamiento
-- **Robustez**: Generalización a diferentes regiones
-- **Escalabilidad**: Capacidad de procesar grandes áreas
+`objetivo.md` (in Spanish) has the full description of the dataset, the annotation format and what the submission has to look like.
 
----
+## Preprocessing
 
-## 🎯 Objetivo
+`src/preprocess.py` does all the heavy lifting:
 
-Desarrollar un **sistema de IA robusto y escalable** capaz de identificar automáticamente edificios dañados vs. no dañados analizando imágenes satelitales de alta resolución pre y post-terremoto.
+- Gets the earthquake date for each event and splits the scenes into pre and post.
+- For each building it picks the best scene on each side based on coverage and closeness to the date, falling back to other scenes if the best one doesn't cover the polygon.
+- Brings all scenes to a common resolution, crops the tile and rasterizes the building mask.
+- Runs in parallel with several workers.
 
-### 🎯 Objetivos Específicos
-
-1. **Clasificación Binaria**: Etiquetar cada edificio como dañado (1) o indemne (0)
-2. **Segmentación Semántica**: Generar máscaras de píxeles dañados
-3. **Análisis Multitemporal**: Comparar escenas pre y post evento
-4. **Generalización**: Funcionar en diferentes regiones geográficas
-
----
-
-## 🔬 Metodología
-
-### 🧠 Enfoque Técnico
-
-Nuestro sistema utiliza una **pipeline de deep learning** que combina:
-
-1. **Preprocesamiento Avanzado**: Tiling, normalización, alineación geográfica
-2. **Arquitecturas CNN**: UNet, ResNet, Transformers
-3. **Análisis Multitemporal**: Comparación pre/post evento
-4. **Post-procesamiento**: Refinamiento de predicciones
-
-### 🔄 Pipeline de Procesamiento
-
-```
-Imágenes Satelitales → Preprocesamiento → Modelo IA → Post-procesamiento → Predicciones
+```bash
+python src/preprocess.py \
+  --data-root data/international-charter-eo4ai-etq-challenge \
+  --output-dir preprocessed \
+  --tile-size 224 \
+  --buffer-meters 20
 ```
 
-### 🎨 Características Innovadoras
+With `--country` you can process a single country and with `--satellites` filter by sensor.
 
-- **Tiling Adaptativo**: Tamaño de tiles configurable según resolución
-- **Aumentación de Datos**: Técnicas avanzadas de data augmentation
-- **Ensemble Learning**: Combinación de múltiples modelos
-- **Transfer Learning**: Aprovechamiento de modelos pre-entrenados
+Something we ran into right away is that a lot of buildings have no pre scene covering them. In one of the Afghanistan areas, for example, 78.7% of the buildings had no before image. That's why the scene matching has so many fallbacks.
 
----
+![Georeferencing](data/imgs/georeferencicion.png)
 
-## 📁 Arquitectura del Proyecto
+### Why we ended up using QGIS
 
-### 🏗️ Estructura General
+At first we tried to align the images and do the pansharpening only with code (`rasterio`, `gdal`, `opencv`), but there were misalignments between the pre and post layers that we couldn't get rid of, automatic pansharpening failed with the multispectral images and some projections weren't resolved correctly.
 
-La siguiente imagen muestra la estructura general del repositorio:
+In the end we did that part in QGIS: load the pre and post images, fix the shifts with manual georeferencing using control points, do the pansharpening, export to GeoTIFF and feed the result into the `preprocess.py` pipeline. The QGIS projects for each country are in `data/*.qgz`. For a model that compares before and after, having both images well aligned is what matters most, and this improved the quality of the dataset quite a lot.
 
-![Estructura del proyecto](data/imgs/estructura.jpg)
+## Models
 
-### 📂 Organización Detallada
+They are all in `src/model.py` and are selected with `--model`. The base one is `siamese_cnn_classifier`, and on top of that idea we tried different heads to compare pre and post:
+
+| Model | Idea |
+|---|---|
+| `siamese_cnn_classifier` | Shared CNN backbone, concatenates pre and post features and classifies |
+| `siamese_cnn_classifier_fpn` | Same but with an FPN to combine several scales |
+| `correlation_siamese_head` | Correlation between the before and after feature maps |
+| `cross_attention_transformer_head` | Cross attention between pre and post |
+| `aspp_style_head` | ASPP style dilated convolutions |
+| `relation_network_head` | Relation network between both branches |
+| `temporal_conv3d_head` | Treats pre and post as a time sequence with 3D convolutions |
+| `prototype_based_head` | Distance to class prototypes |
+| `multitask_head` | Several outputs at once |
+| `siamese_efficientnet_classifier` / `siamese_efficientnet_fpn` | Same with an EfficientNet-B0 backbone |
+
+## Training
+
+```bash
+python src/train.py --config config.yaml --model siamese_cnn_classifier --epochs 10
+```
+
+Useful options:
+
+- `--mode pre_post | pre_only | post_only`: which images to use.
+- `--loss_type bce | dice | bce_dice | focal`: there are far fewer damaged buildings than undamaged ones, so the loss and the `class_weights` in the config matter quite a bit.
+- `--small_dataset`: trains with 20% of the data for quick tests.
+- `--resume`: to continue from a checkpoint.
+
+Training has mixed precision, early stopping and a cosine scheduler with warmup. Logs can be viewed with TensorBoard or Weights & Biases.
+
+## Inference and submission
+
+```bash
+python src/test.py \
+  --model_path outputs/models/checkpoint_epoch_2.pth \
+  --input_dir submissions/submission_1 \
+  --output_dir submissions/submission_5
+```
+
+It generates one `.gpkg` per city (`adiyaman`, `antakya_east`, `china`, `marash`) with the label of each building. The ones we submitted are in `submissions/`.
+
+## Visualization
+
+To check the tiles and the predictions we used `src/visualizar_tiles.py` and `src/visualizar_escenas.py`.
+
+| Close view | Wide view |
+|---|---|
+| ![Close view](data/imgs/Figure_1_cerca.png) | ![Wide view](data/imgs/Figure_1_lejos.png) |
+
+![Pre and post tile](data/imgs/image_visualizar_tile.png)
+
+![Tile analysis](data/imgs/image_visualizar_tile_2.png)
+
+## Debugging scripts
+
+`proof_scripts/` has the scripts we wrote along the way to debug the dataset: checking defective tiles, seeing which bands each scene has, listing image dates, viewing the content of the `.gpkg` files or a specific pre/post tile, checking augmented batches, etc. Several of them are specific to issues we had with Afghanistan and Adiyaman.
+
+## Structure
 
 ```
 AIFOREARTHQUAKE/
-├── 📁 data/                          # Datasets y datos
-│   ├── 📁 imgs/                      # Imágenes de documentación
-│   │   ├── estructura.jpg            # Estructura del proyecto
-│   │   ├── dataset.jpg               # Estructura del dataset
-│   │   ├── Figure_1_cerca.png        # Vista cercana de predicciones
-│   │   ├── Figure_1_lejos.png        # Vista lejana de predicciones
-│   │   ├── georeferencicion.png      # Proceso de georreferenciación
-│   │   ├── image_visualizar_tile.png # Visualización de tiles pre/post
-│   │   └── image_visualizar_tile_2.png # Análisis detallado de tiles
-│   └── 📁 international-charter-eo4ai-etq-challenge/  # Dataset original (ignorado)
-├── 📁 configs/                       # Configuraciones de experimentos
-│   ├── baseline.yaml                 # Configuración base
-│   ├── unet_resnet50.yaml            # UNet con ResNet-50
-│   └── segmentation_transformer.yaml # Transformer para segmentación
-├── 📁 src/                           # Código fuente principal
-│   ├── 📄 preprocess.py              # Preprocesamiento de datos (69KB)
-│   ├── 📄 data_loader.py             # Carga de datos y DataLoaders (30KB)
-│   ├── 📄 model.py                   # Definición de modelos (24KB)
-│   ├── 📄 train.py                   # Entrenamiento y validación (47KB)
-│   ├── 📄 test.py                    # Evaluación y predicción (8.7KB)
-│   ├── 📄 transforms.py              # Transformaciones y aumentos (11KB)
-│   ├── 📄 utils.py                   # Utilidades y métricas (22KB)
-│   ├── 📄 config.py                  # Configuración del experimento (9.3KB)
-│   ├── 📄 train_backbone.py          # Entrenamiento de backbones (7.9KB)
-│   ├── 📄 visualizar_escenas.py      # Visualización de escenas (53KB)
-│   └── 📄 sampler_aug.py             # Sampler con aumentación (2.9KB)
-├── 📁 preprocessed/                  # Datos preprocesados
-├── 📁 outputs/                       # Modelos, logs y predicciones
-├── 📁 proof_scripts/                 # Scripts de prueba y análisis
-├── 📁 submissions/                   # Submissions para la competición
-├── 📁 test/                          # Tests unitarios
-├── 📄 config.yaml                    # Configuración principal
-├── 📄 requirements.txt               # Dependencias
-├── 📄 objetivo.md                    # Documentación del objetivo
-├── 📄 example_submission.py          # Ejemplo de submission
-└── 📄 README.md                      # Este archivo
+├── config.yaml            Main configuration
+├── configs/               Other test configurations
+├── data/                  QGIS projects (.qgz) and README images
+├── src/
+│   ├── preprocess.py      Scene matching and tile generation
+│   ├── data_loader.py     Dataset and DataLoaders
+│   ├── model.py           Siamese models and heads
+│   ├── train.py           Training
+│   ├── test.py            Inference and submission
+│   ├── transforms.py      Augmentations
+│   ├── sampler_aug.py     Sampler with augmentation
+│   ├── train_backbone.py  Backbone pretraining
+│   └── visualizar_*.py    Tile and scene visualization
+├── proof_scripts/         Debugging and analysis scripts
+├── submissions/           Submitted files
+└── objetivo.md            Challenge and dataset description (Spanish)
 ```
 
-### 🔧 Componentes Principales
+## Installation
 
-#### 📊 **Preprocesamiento (`src/preprocess.py`)**
-- **Tamaño**: 69KB, 1,594 líneas
-- **Función**: Pipeline completo de preprocesamiento
-- **Características**:
-  - Tiling adaptativo con solapamiento configurable
-  - Normalización de bandas espectrales
-  - Rasterización de anotaciones vectoriales
-  - Alineación geográfica pre/post evento
-  - Compresión eficiente con formato NPZ
-
-#### 🎯 **Modelos (`src/model.py`)**
-- **Tamaño**: 24KB, 706 líneas
-- **Arquitecturas**:
-  - UNet con diferentes backbones
-  - ResNet-50/101/152
-  - Transformers para segmentación
-  - Modelos ensemble
-
-#### 🚀 **Entrenamiento (`src/train.py`)**
-- **Tamaño**: 47KB, 979 líneas
-- **Características**:
-  - Entrenamiento distribuido (DDP)
-  - Mixed precision training (AMP)
-  - Early stopping y checkpointing
-  - Logging con TensorBoard/WandB
-  - Múltiples seeds para reproducibilidad
-
-#### 🔍 **Evaluación (`src/test.py`)**
-- **Tamaño**: 8.7KB, 180 líneas
-- **Métricas**:
-  - IoU (Intersection over Union)
-  - Dice Coefficient (F1-Score)
-  - Precision y Recall
-  - Accuracy por clase
-
-#### 🖼️ **Visualización (`src/visualizar_escenas.py`)**
-- **Tamaño**: 53KB, 1,095 líneas
-- **Función**: Herramientas avanzadas de visualización
-- **Características**:
-  - Visualización de tiles pre/post evento
-  - Análisis de bandas espectrales
-  - Comparación de máscaras de daño
-  - Generación de overlays informativos
-
----
-
-## 🚀 Instalación y Configuración
-
-### 📋 Requisitos del Sistema
-
-- **Python**: 3.8 o superior
-- **CUDA**: 11.0+ (para GPU)
-- **RAM**: Mínimo 16GB (recomendado 32GB+)
-- **Almacenamiento**: 100GB+ para datasets completos
-
-### 🔧 Instalación Paso a Paso
-
-1. **Clonar el repositorio:**
-```bash
-git clone <repository-url>
-cd AIFOREARTHQUAKE
-```
-
-2. **Crear entorno virtual:**
-```bash
-# Opción 1: venv (recomendado)
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# o
-venv\Scripts\activate     # Windows
-
-# Opción 2: conda
-conda create -n earthquake python=3.9
-conda activate earthquake
-```
-
-3. **Instalar dependencias:**
 ```bash
 pip install -r requirements.txt
 ```
 
-4. **Verificar instalación:**
-```bash
-python -c "import torch; print(f'PyTorch {torch.__version__}')"
-python -c "import torchvision; print(f'TorchVision {torchvision.__version__}')"
-```
+You need a CUDA GPU to train in a reasonable time. For preprocessing we used a separate conda environment with `rasterio`, `geopandas` and `fiona`.
 
-### 🔧 Configuración de GPU (Opcional)
+## Team
 
-```bash
-# Verificar CUDA
-nvidia-smi
+[Sauvageduck24](https://github.com/Sauvageduck24) and [SilverDelgado](https://github.com/SilverDelgado).
 
-# Instalar PyTorch con CUDA
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-```
-
----
-
-## 📊 Preparación de Datos
-
-### 🌍 Acceso al Dataset
-
-1. **Registrarse** en [AI4EO Platform](https://platform.ai4eo.eu/ai-for-earthquake-response)
-2. **Crear cuenta** en [EOTDL](https://www.eotdl.com) con el mismo email
-3. **Esperar** hasta 48h para acceso al dataset
-4. **Descargar** el dataset en `data/international-charter-eo4ai-etq-challenge/`
-
-### 📁 Estructura del Dataset
-
-El siguiente diagrama muestra la organización de los datos:
-
-![Estructura del dataset](data/imgs/dataset.jpg)
-
-### 🔄 Pipeline de Preprocesamiento
-
-#### **Paso 1: Preprocesamiento Básico**
-```bash
-python src/preprocess.py \
-  --raw_data_root data/international-charter-eo4ai-etq-challenge/Training \
-  --output_root preprocessed \
-  --binary \
-  --seed 42 \
-  --workers 4
-```
-
-#### **Paso 2: Generación de DataLoaders**
-```bash
-# Para pruebas rápidas (split small)
-python src/data_loader.py --small
-
-# Para entrenamiento completo (split full)
-python src/data_loader.py
-```
-
-### ⚙️ Parámetros de Preprocesamiento
-
-| Parámetro | Valor por Defecto | Descripción |
-|-----------|-------------------|-------------|
-| `TILE_SIZE` | 512 | Tamaño de tiles en píxeles |
-| `TILE_OVERLAP` | 64 | Solapamiento entre tiles |
-| `MIN_VALID_PIXELS` | 0.1 | % mínimo de píxeles válidos |
-| `BANDS` | ['red', 'green', 'blue', 'nir'] | Bandas a procesar |
-
-### 🔍 Proceso de Georreferenciación
-
-El siguiente diagrama ilustra el proceso de alineación geográfica:
-
-![Proceso de georreferenciación](data/imgs/georeferencicion.png)
-
----
-
-### 🔍 Proceso de Georreferenciación
-
-El siguiente diagrama ilustra el proceso de alineación geográfica:
-
-![Proceso de georreferenciación](data/imgs/georeferencicion.png)
-
----
-
-## 🛰️ Uso de QGIS para Georreferenciación y Pansharpening
-
-Durante el desarrollo del proyecto, se exploraron varias herramientas para el procesamiento inicial de imágenes satelitales, incluyendo scripts en Python utilizando `rasterio`, `gdal`, y `opencv`. Sin embargo, estas aproximaciones presentaron varios retos:
-
-- ❌ **Desalineación persistente** entre capas pre y post-terremoto.
-- ❌ **Errores en la fusión pansharpening** con scripts automatizados (especialmente al manipular imágenes multiespectrales de alta resolución).
-- ❌ **Problemas de proyección y referencia espacial** no resueltos correctamente desde código.
-
-### ✅ QGIS como Solución Integral
-
-Ante estos problemas, se optó por utilizar **QGIS** como herramienta principal para la etapa de preprocesamiento geoespacial debido a sus ventajas:
-
-- 🗺️ **Georreferenciación precisa** usando herramientas gráficas de control de puntos y ajuste por transformación.
-- 🎨 **Pansharpening supervisado visualmente**, con plugins como *Orfeo Toolbox* o herramientas nativas.
-- 🧩 **Reproyección masiva** y conversión entre formatos con mayor estabilidad.
-- 🧭 Compatibilidad directa con archivos `.gpkg`, `.tif` y `.vrt`.
-
-Este enfoque híbrido (preprocesamiento en QGIS + pipeline IA en Python) permitió **aumentar significativamente la calidad del dataset final**, asegurando una alineación espacial precisa que es crítica para modelos de segmentación semántica multitemporal.
-
-### 🖼️ Ejemplo del Flujo en QGIS
-
-1. **Cargar imágenes pre y post** en QGIS.
-2. **Corregir desplazamientos** con georreferenciación manual.
-3. **Aplicar pansharpening** utilizando herramientas espectrales.
-4. **Exportar imágenes alineadas** a GeoTIFF.
-5. **Integrar resultados al pipeline de `preprocess.py`** mediante archivos `.npz` generados a partir de estas salidas.
-
----
-
-## 🏗️ Entrenamiento de Modelos
-
-### 🎯 Configuraciones Disponibles
-
-#### **1. Baseline (Recomendado para empezar)**
-```bash
-python src/train.py --config configs/baseline.yaml
-```
-
-#### **2. UNet con ResNet-50**
-```bash
-python src/train.py --config configs/unet_resnet50.yaml
-```
-
-#### **3. Transformer para Segmentación**
-```bash
-python src/train.py --config configs/segmentation_transformer.yaml
-```
-
-### 🚀 Entrenamiento Avanzado
-
-#### **Entrenamiento Distribuido (DDP)**
-```bash
-python -m torch.distributed.launch \
-  --nproc_per_node=4 \
-  src/train.py \
-  --config configs/baseline.yaml \
-  --distributed
-```
-
-#### **Entrenamiento con Múltiples Seeds**
-```bash
-for seed in 42 123 456 789 101112; do
-  python src/train.py \
-    --config configs/baseline.yaml \
-    --seed $seed
-done
-```
-
-#### **Entrenamiento de Backbone**
-```bash
-python src/train_backbone.py \
-  --config configs/baseline.yaml \
-  --backbone resnet50
-```
-
-### 📊 Monitoreo del Entrenamiento
-
-#### **TensorBoard**
-```bash
-tensorboard --logdir outputs/logs
-```
-
-#### **Weights & Biases**
-```bash
-wandb login
-python src/train.py --config configs/baseline.yaml --wandb
-```
-
-### ⚙️ Hiperparámetros Principales
-
-| Parámetro | Baseline | UNet-ResNet50 | Transformer |
-|-----------|----------|---------------|-------------|
-| **Learning Rate** | 1e-4 | 1e-4 | 5e-5 |
-| **Batch Size** | 8 | 16 | 4 |
-| **Epochs** | 100 | 150 | 200 |
-| **Optimizer** | AdamW | AdamW | AdamW |
-| **Scheduler** | CosineAnnealing | CosineAnnealing | LinearWarmup |
-
----
-
-## 🔍 Evaluación y Predicción
-
-### 📊 Evaluación de Modelos
-
-```bash
-python src/test.py \
-  --config configs/baseline.yaml \
-  --model_path outputs/models/best_model.pth
-```
-
-### 🎯 Generación de Predicciones
-
-```bash
-python src/test.py \
-  --config configs/baseline.yaml \
-  --model_path outputs/models/best_model.pth \
-  --predict_only \
-  --output_dir outputs/predictions
-```
-
-### 📈 Análisis de Resultados
-
-```bash
-# Análisis de métricas por ciudad
-python proof_scripts/evaluate.py \
-  --predictions outputs/predictions \
-  --ground_truth data/test_annotations
-```
-
----
-
-## 📈 Resultados y Visualizaciones
-
-### 🔍 Comparación de Escalas
-
-Nuestro sistema proporciona visualizaciones a diferentes escalas para evaluar la calidad de las predicciones:
-
-#### **Vista Cercana (Nivel Edificio)**
-![Vista cercana](data/imgs/Figure_1_cerca.png)
-
-*Detalle de predicciones a nivel de edificio individual, mostrando la precisión en la clasificación de daños específicos.*
-
-#### **Vista Lejana (Nivel Regional)**
-![Vista lejana](data/imgs/Figure_1_lejos.png)
-
-*Vista general del área afectada, permitiendo evaluar la distribución espacial de los daños y la cobertura del modelo.*
-
-### 🖼️ Análisis de Tiles y Visualización
-
-Nuestro sistema incluye herramientas avanzadas de visualización para analizar los tiles generados durante el preprocesamiento:
-
-#### **Visualización de Tiles Pre/Post Evento**
-![Visualización de tiles](data/imgs/image_visualizar_tile.png)
-
-*Comparación detallada de tiles antes y después del evento sísmico, mostrando las diferencias espectrales y estructurales que indican daños.*
-
-#### **Análisis Detallado de Tiles**
-![Análisis de tiles](data/imgs/image_visualizar_tile_2.png)
-
-*Análisis profundo de la composición espectral de los tiles, incluyendo bandas individuales y combinaciones que resaltan características de daño.*
-
-### 📊 Métricas de Rendimiento
-
-| Métrica | Baseline | UNet-ResNet50 | Transformer | Ensemble |
-|---------|----------|---------------|-------------|----------|
-| **IoU** | 0.72 | 0.78 | 0.75 | 0.81 |
-| **F1-Score** | 0.84 | 0.88 | 0.86 | 0.90 |
-| **Precision** | 0.87 | 0.91 | 0.89 | 0.93 |
-| **Recall** | 0.81 | 0.85 | 0.83 | 0.87 |
-| **Accuracy** | 0.89 | 0.92 | 0.90 | 0.94 |
-
-### 🎯 Análisis por Región
-
-| Región | IoU | F1-Score | Observaciones |
-|--------|-----|----------|---------------|
-| **China** | 0.75 | 0.86 | Buen rendimiento en áreas urbanas |
-| **Turkey (Adiyaman)** | 0.78 | 0.88 | Excelente en áreas mixtas |
-| **Turkey (Marash)** | 0.73 | 0.84 | Desafío en áreas rurales |
-| **Turkey (Antakya)** | 0.76 | 0.87 | Buen balance urbano/rural |
-
----
-
-## ⚙️ Configuración Avanzada
-
-### 📋 Archivos de Configuración
-
-#### **Estructura de Configuración**
-```yaml
-# configs/baseline.yaml
-model:
-  name: "unet"
-  backbone: "resnet34"
-  pretrained: true
-  num_classes: 1
-
-data:
-  tile_size: 512
-  overlap: 64
-  bands: ["red", "green", "blue", "nir"]
-  normalization: "imagenet"
-
-training:
-  batch_size: 8
-  learning_rate: 1e-4
-  epochs: 100
-  optimizer: "adamw"
-  scheduler: "cosine"
-  loss: "bce_dice"
-
-augmentation:
-  horizontal_flip: 0.5
-  vertical_flip: 0.5
-  rotation: 90
-  brightness_contrast: 0.2
-```
-
-#### **Configuraciones Especializadas**
-
-**UNet con ResNet-50:**
-```yaml
-model:
-  name: "unet"
-  backbone: "resnet50"
-  decoder_channels: [256, 128, 64, 32, 16]
-```
-
-**Transformer:**
-```yaml
-model:
-  name: "segmentation_transformer"
-  encoder: "vit_base_patch16_224"
-  decoder: "unet_decoder"
-  patch_size: 16
-```
-
-### 🔧 Personalización Avanzada
-
-#### **Aumentación de Datos Personalizada**
-```python
-# src/transforms.py
-class EarthquakeAugmentation:
-    def __init__(self):
-        self.transforms = A.Compose([
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.RandomRotate90(p=0.5),
-            A.ShiftScaleRotate(p=0.5),
-            A.OneOf([
-                A.RandomBrightnessContrast(p=1),
-                A.RandomGamma(p=1),
-            ], p=0.5),
-        ])
-```
-
-#### **Loss Functions Personalizadas**
-```python
-# src/utils.py
-class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.5):
-        super().__init__()
-        self.alpha = alpha
-        self.bce = nn.BCEWithLogitsLoss()
-        self.dice = DiceLoss()
-    
-    def forward(self, pred, target):
-        return self.alpha * self.bce(pred, target) + \
-               (1 - self.alpha) * self.dice(pred, target)
-```
-
----
-
-## 🧪 Experimentos y Análisis
-
-### 🔬 Scripts de Análisis
-
-El directorio `proof_scripts/` contiene herramientas avanzadas para análisis y depuración:
-
-#### **Análisis de Datos**
-- `analyze_example_submission.py`: Estructura de submissions
-- `analyze_npz_channels.py`: Análisis de canales NPZ
-- `calc_max_fids_per_tile.py`: Cálculo de FIDs por tile
-- `check_band_assets.py`: Verificación de assets de bandas
-- `check_tiles.py`: Verificación de tiles generados
-
-#### **Depuración y Visualización**
-- `debug_adiyaman.py`: Depuración específica para Adiyaman
-- `evaluate.py`: Evaluación detallada de modelos
-- `list_image_dates.py`: Listado de fechas de imágenes
-- `test_single_tile.py`: Prueba de tiles individuales
-- `view_augmented_batch.py`: Visualización de batches aumentados
-- `view_gpkg_content.py`: Visualización de contenido GPKG
-- `view_prepost_tile.py`: Visualización de tiles pre/post
-- `visualizar_escenas.py`: Herramientas avanzadas de visualización de tiles
-
-### 📊 Experimentos Recomendados
-
-#### **1. Comparación de Backbones**
-```bash
-for backbone in resnet18 resnet34 resnet50 resnet101; do
-  python src/train.py \
-    --config configs/baseline.yaml \
-    --backbone $backbone \
-    --experiment_name "backbone_$backbone"
-done
-```
-
-#### **2. Análisis de Sensibilidad**
-```bash
-for lr in 1e-5 5e-5 1e-4 5e-4 1e-3; do
-  python src/train.py \
-    --config configs/baseline.yaml \
-    --learning_rate $lr \
-    --experiment_name "lr_$lr"
-done
-```
-
-#### **3. Ensembles**
-```bash
-# Entrenar múltiples modelos
-python src/train.py --config configs/baseline.yaml --seed 42
-python src/train.py --config configs/unet_resnet50.yaml --seed 123
-python src/train.py --config configs/segmentation_transformer.yaml --seed 456
-
-# Evaluar ensemble
-python src/test.py --ensemble --model_paths outputs/models/
-```
-
----
-
-## 📊 Métricas y Evaluación
-
-### 🎯 Métricas Implementadas
-
-#### **Métricas de Segmentación**
-- **IoU (Intersection over Union)**: Medida de solapamiento entre predicción y ground truth
-- **Dice Coefficient (F1-Score)**: Balance entre precisión y recall
-- **Precision**: Proporción de predicciones positivas correctas
-- **Recall**: Proporción de casos positivos detectados
-- **Accuracy**: Proporción total de predicciones correctas
-
-#### **Métricas Específicas del Dominio**
-- **Building-level Accuracy**: Precisión a nivel de edificio
-- **Damage Detection Rate**: Tasa de detección de daños
-- **False Positive Rate**: Tasa de falsos positivos
-- **Regional Performance**: Rendimiento por región geográfica
-
-## 🛠️ Características Técnicas
-
-### ✅ Funcionalidades Implementadas
-
-#### **🔄 Preprocesamiento**
-- ✅ **Tiling Adaptativo**: Tamaño configurable según resolución
-- ✅ **Alineación Geográfica**: Registro preciso pre/post evento
-- ✅ **Normalización Avanzada**: Múltiples estrategias de normalización
-- ✅ **Compresión Eficiente**: Formato NPZ para ahorro de espacio
-- ✅ **Filtrado Inteligente**: Eliminación de tiles sin información útil
-
-#### **🧠 Modelos de IA**
-- ✅ **UNet**: Arquitectura estándar para segmentación
-- ✅ **ResNet Backbones**: Múltiples profundidades (18, 34, 50, 101)
-- ✅ **Transformers**: Arquitecturas basadas en atención
-- ✅ **Ensemble Learning**: Combinación de múltiples modelos
-- ✅ **Transfer Learning**: Aprovechamiento de modelos pre-entrenados
-
-#### **🚀 Entrenamiento**
-- ✅ **Entrenamiento Distribuido (DDP)**: Escalabilidad multi-GPU
-- ✅ **Mixed Precision Training (AMP)**: Aceleración y ahorro de memoria
-- ✅ **Early Stopping**: Detección automática de overfitting
-- ✅ **Checkpointing**: Guardado automático de mejores modelos
-- ✅ **Múltiples Seeds**: Reproducibilidad de experimentos
-
-#### **📊 Logging y Monitoreo**
-- ✅ **TensorBoard**: Visualización de métricas en tiempo real
-- ✅ **Weights & Biases**: Tracking de experimentos en la nube
-- ✅ **Logging Avanzado**: Registro detallado de parámetros
-- ✅ **Visualización**: Herramientas de visualización de resultados
-
-#### **🔧 Utilidades**
-- ✅ **Data Augmentation**: Técnicas avanzadas de aumentación
-- ✅ **Loss Functions**: Múltiples funciones de pérdida
-- ✅ **Métricas**: Implementación completa de métricas de evaluación
-- ✅ **Configuración**: Sistema flexible de configuración YAML
-- ✅ **Visualización**: Herramientas avanzadas de análisis visual
-
-### 🔮 Características Futuras
-
-#### **🔄 En Desarrollo**
-- 🔄 **Semi-supervised Learning**: Aprovechamiento de datos no etiquetados
-- 🔄 **Active Learning**: Selección inteligente de muestras
-- 🔄 **Multi-temporal Fusion**: Fusión avanzada de imágenes temporales
-- 🔄 **Real-time Processing**: Procesamiento en tiempo real
-
-#### **📈 Mejoras Planificadas**
-- 📈 **Graph Neural Networks**: Modelado de relaciones espaciales
-- 📈 **Attention Mechanisms**: Atención específica para daños
-- 📈 **Uncertainty Quantification**: Estimación de incertidumbre
-- 📈 **Explainable AI**: Interpretabilidad de predicciones
-
----
-
-## 🤝 Contribución
-
-### 📋 Guías de Contribución
-
-1. **Fork el proyecto**
-2. **Crear rama feature** (`git checkout -b feature/AmazingFeature`)
-3. **Commit cambios** (`git commit -m 'Add AmazingFeature'`)
-4. **Push a la rama** (`git push origin feature/AmazingFeature`)
-5. **Abrir Pull Request**
-
-### 🧪 Desarrollo Local
-
-#### **Configuración del Entorno de Desarrollo**
-```bash
-# Instalar dependencias de desarrollo
-pip install -r requirements-dev.txt
-
-# Configurar pre-commit hooks
-pre-commit install
-
-# Ejecutar tests
-pytest test/
-```
-
-#### **Estándares de Código**
-- **PEP 8**: Estilo de código Python
-- **Type Hints**: Anotaciones de tipos
-- **Docstrings**: Documentación de funciones
-- **Tests**: Cobertura de tests > 80%
-
-### 📝 Reporte de Bugs
-
-Para reportar bugs o solicitar características:
-1. **Buscar issues existentes** para evitar duplicados
-2. **Crear nuevo issue** con descripción detallada
-3. **Incluir logs y configuraciones** relevantes
-4. **Proporcionar pasos de reproducción** claros
-
----
-
-## 📄 Licencia
-
-Este proyecto está bajo la **Licencia MIT**. Ver [LICENSE](LICENSE) para más detalles.
-
-### 📋 Términos de Licencia
-
-- ✅ **Uso Comercial**: Permitido
-- ✅ **Modificación**: Permitido
-- ✅ **Distribución**: Permitido
-- ✅ **Uso Privado**: Permitido
-- ⚠️ **Atribución**: Requerida
-- ❌ **Garantía**: No proporcionada
-
----
-
-## 🙏 Agradecimientos
-
-### 🏆 Organizadores de la Competición
-- **ESA Φ-lab** por organizar la competición
-- **International Charter 'Space and Major Disasters'** por proporcionar los datos
-- **AI4EO Platform** por facilitar la competición
-
-### 🛠️ Herramientas y Librerías
-- **PyTorch** por el framework de deep learning
-- **Albumentations** por las transformaciones de datos
-- **Segmentation Models** por las arquitecturas de segmentación
-- **Rich** por la interfaz de consola mejorada
-
-### 👥 Comunidad
-- **Open Source Community** por las herramientas y librerías
-- **Research Community** por los papers y metodologías
-- **Competition Participants** por la colaboración y discusión
-
----
-
-### 🎯 **Objetivo del Equipo**
-Desarrollar soluciones de IA que puedan **salvar vidas** y **acelerar la respuesta humanitaria** tras desastres naturales, contribuyendo a un mundo más resiliente y preparado.
-
----
-
-**⚠️ Nota Importante**: Este proyecto es parte de la competición [AI for Earthquake Response](https://platform.ai4eo.eu/ai-for-earthquake-response). Los datos están sujetos a restricciones de acceso y deben ser solicitados manualmente al equipo organizador.
+MIT License.
