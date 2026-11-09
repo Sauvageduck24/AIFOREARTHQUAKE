@@ -8,6 +8,18 @@ The challenge: given high resolution satellite images from before and after an e
 
 The data covers earthquakes in Turkey (Adiyaman, Antakya, Marash), Syria, China, Morocco, Myanmar and Afghanistan, with images from different satellites (WorldView, Pléiades...), each one with its own resolution and bands.
 
+## Visualization
+
+To check the tiles and the predictions we used `src/visualizar_tiles.py` and `src/visualizar_escenas.py`.
+
+| Close view | Wide view |
+|---|---|
+| ![Close view](data/imgs/Figure_1_cerca.png) | ![Wide view](data/imgs/Figure_1_lejos.png) |
+
+![Pre and post tile](data/imgs/image_visualizar_tile.png)
+
+![Tile analysis](data/imgs/image_visualizar_tile_2.png)
+
 ## Approach
 
 1. **Preprocessing**: for each building we look for the best pre and post event scene, crop a tile centred on the building (224 px by default, with a 20 m margin around it) and save it as `.npz` together with its label.
@@ -99,18 +111,6 @@ python src/test.py \
 ```
 
 It generates one `.gpkg` per city (`adiyaman`, `antakya_east`, `china`, `marash`) with the label of each building. The ones we submitted are in `submissions/`.
-
-## Visualization
-
-To check the tiles and the predictions we used `src/visualizar_tiles.py` and `src/visualizar_escenas.py`.
-
-| Close view | Wide view |
-|---|---|
-| ![Close view](data/imgs/Figure_1_cerca.png) | ![Wide view](data/imgs/Figure_1_lejos.png) |
-
-![Pre and post tile](data/imgs/image_visualizar_tile.png)
-
-![Tile analysis](data/imgs/image_visualizar_tile_2.png)
 
 ## Debugging scripts
 
